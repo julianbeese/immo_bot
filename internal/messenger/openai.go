@@ -136,10 +136,13 @@ Wohnungsinserat:
 - Beschreibung: %s
 
 Schreibe 1-2 kurze, authentische Sätze darüber, was an dieser Wohnung besonders ansprechend ist.
-Beispiel-Stil: "Die Bilder haben uns direkt angesprochen, besonders die hellen Räume und der Balkon. Außerdem finden wir die Lage super!"
+Beispiel-Stil: "Die Bilder haben uns direkt angesprochen, besonders die hellen Räume und das schöne Parkett. Die Lage finden wir sehr ansprechend!"
 
-Nenne 2-3 konkrete Aspekte aus dem Inserat. Sei enthusiastisch aber nicht übertrieben. Schreibe auf Deutsch.
-Gib NUR die 1-2 Sätze zurück, keine Anführungszeichen, keine Erklärung.
+WICHTIG:
+- Nenne 2-3 konkrete Aspekte aus dem Inserat (z.B. helle Räume, schönes Parkett, toller Balkon, moderne Küche, etc.)
+- Erwähne KEINE Besichtigung - das kommt später im Text.
+- Sei enthusiastisch aber nicht übertrieben. Schreibe auf Deutsch.
+- Gib NUR die 1-2 Sätze zurück, keine Anführungszeichen, keine Erklärung.
 `,
 		listing.Title,
 		listing.District,
@@ -156,6 +159,9 @@ func (e *OpenAIEnhancer) fallbackEnhance(message string, listing *domain.Listing
 	if listing.HasBalcony {
 		details = append(details, "der Balkon")
 	}
+	if listing.HasEBK {
+		details = append(details, "die Einbauküche")
+	}
 	if listing.Area > 0 {
 		details = append(details, fmt.Sprintf("die großzügige Wohnfläche von %d m²", listing.Area))
 	}
@@ -165,11 +171,11 @@ func (e *OpenAIEnhancer) fallbackEnhance(message string, listing *domain.Listing
 
 	var personalizedDetails string
 	if len(details) >= 2 {
-		personalizedDetails = fmt.Sprintf("Die Wohnung hat uns direkt angesprochen, besonders %s und %s. Daher würden wir sie gerne persönlich besichtigen.", details[0], details[1])
+		personalizedDetails = fmt.Sprintf("Die Bilder haben uns direkt angesprochen, besonders %s und %s.", details[0], details[1])
 	} else if len(details) == 1 {
-		personalizedDetails = fmt.Sprintf("Die Wohnung hat uns direkt angesprochen, besonders %s. Daher würden wir sie gerne persönlich besichtigen.", details[0])
+		personalizedDetails = fmt.Sprintf("Die Bilder haben uns direkt angesprochen, besonders %s.", details[0])
 	} else {
-		personalizedDetails = "Die Wohnung hat uns auf den Bildern direkt angesprochen und entspricht genau unseren Vorstellungen. Daher würden wir sie gerne persönlich besichtigen."
+		personalizedDetails = "Die Bilder haben uns direkt angesprochen und die Wohnung entspricht genau unseren Vorstellungen."
 	}
 
 	return strings.Replace(message, "{{.PersonalizedDetails}}", personalizedDetails, 1)
@@ -189,9 +195,10 @@ func truncate(s string, maxLen int) string {
 
 const systemPrompt = `Du bist ein Assistent, der personalisierte Sätze für Wohnungsbewerbungen schreibt.
 Deine Aufgabe ist es, 1-2 authentische, enthusiastische Sätze zu schreiben, die zeigen, warum diese spezifische Wohnung interessant ist.
-Nenne konkrete Details aus dem Inserat (Lage, Ausstattung, Räume, etc.).
+Nenne konkrete Details aus dem Inserat (Lage, Ausstattung, Räume, Bilder, etc.).
 Schreibe natürlich und persönlich, nicht generisch.
-Vermeide Phrasen wie "Sehr geehrte" oder "Mit freundlichen Grüßen" - nur den Mittelteil.`
+WICHTIG: Erwähne KEINE Besichtigung - das kommt später im Text.
+Vermeide Phrasen wie "Sehr geehrte", "Mit freundlichen Grüßen", "besichtigen", "Besichtigung" - nur den Mittelteil über die Wohnung selbst.`
 
 type openAIRequest struct {
 	Model       string          `json:"model"`

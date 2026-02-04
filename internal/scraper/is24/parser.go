@@ -108,7 +108,17 @@ func (p *Parser) extractResultEntries(html string) []map[string]interface{} {
 		}
 	}
 
-	// Alternative: Look for individual expose objects
+	// Try to find searchResponseModel with resultlistEntries
+	searchModelPattern := regexp.MustCompile(`"searchResponseModel"\s*:\s*\{[^}]*"resultlistEntries"\s*:\s*\[([^\]]+)\]`)
+	if matches := searchModelPattern.FindStringSubmatch(html); len(matches) > 1 {
+		var entries []map[string]interface{}
+		jsonStr := "[" + matches[1] + "]"
+		if err := json.Unmarshal([]byte(jsonStr), &entries); err == nil {
+			return entries
+		}
+	}
+
+	// Alternative: Look for individual expose objects with realEstate nested
 	exposePattern := regexp.MustCompile(`"@id"\s*:\s*"([^"]+/expose/\d+)"[^}]*?"realEstate"\s*:\s*(\{[^}]+\})`)
 	matches := exposePattern.FindAllStringSubmatch(html, -1)
 
@@ -118,6 +128,21 @@ func (p *Parser) extractResultEntries(html string) []map[string]interface{} {
 			var estate map[string]interface{}
 			if err := json.Unmarshal([]byte(match[2]), &estate); err == nil {
 				estate["@id"] = match[1]
+				results = append(results, estate)
+			}
+		}
+	}
+
+	// Alternative: Extract individual listing cards with their IDs and data
+	if len(results) == 0 {
+		cardPattern := regexp.MustCompile(`data-id="(\d+)"[^>]*>[\s\S]*?(?:price|miete)[^\d]*(\d+(?:\.\d{3})*(?:,\d+)?)\s*€`)
+		cardMatches := cardPattern.FindAllStringSubmatch(html, -1)
+		for _, match := range cardMatches {
+			if len(match) >= 3 {
+				estate := map[string]interface{}{
+					"@id":   "/expose/" + match[1],
+					"price": parsePrice(match[2]),
+				}
 				results = append(results, estate)
 			}
 		}
@@ -171,13 +196,36 @@ func (p *Parser) resultToListing(result map[string]interface{}) domain.Listing {
 		listing.Address = strings.Join(parts, ", ")
 	}
 
-	// Price
+	// Price - try multiple possible locations
 	if price, ok := realEstate["price"].(map[string]interface{}); ok {
 		if value := getFloat(price, "value"); value > 0 {
 			listing.Price = int(value)
 		}
-	} else if price := getFloat(realEstate, "price"); price > 0 {
-		listing.Price = int(price)
+	}
+	if listing.Price == 0 {
+		if price := getFloat(realEstate, "price"); price > 0 {
+			listing.Price = int(price)
+		}
+	}
+	// Try calculatedPrice (cold rent / Kaltmiete)
+	if listing.Price == 0 {
+		if calcPrice, ok := realEstate["calculatedPrice"].(map[string]interface{}); ok {
+			if value := getFloat(calcPrice, "value"); value > 0 {
+				listing.Price = int(value)
+			}
+		}
+	}
+	// Try rentBasePrice
+	if listing.Price == 0 {
+		listing.Price = int(getFloat(realEstate, "rentBasePrice"))
+	}
+	// Try baseRent
+	if listing.Price == 0 {
+		listing.Price = int(getFloat(realEstate, "baseRent"))
+	}
+	// Try coldRent
+	if listing.Price == 0 {
+		listing.Price = int(getFloat(realEstate, "coldRent"))
 	}
 
 	// Rooms
@@ -285,11 +333,26 @@ func (p *Parser) extractExposeDetails(listing *domain.Listing, html string) {
 		}
 	}
 
-	// Extract price
+	// Extract price - try multiple patterns
 	if listing.Price == 0 {
-		pricePattern := regexp.MustCompile(`<div[^>]*class="[^"]*is24qa-kaltmiete[^"]*"[^>]*>([^<]+)</div>`)
-		if matches := pricePattern.FindStringSubmatch(html); len(matches) > 1 {
-			listing.Price = parsePrice(matches[1])
+		pricePatterns := []*regexp.Regexp{
+			regexp.MustCompile(`<div[^>]*class="[^"]*is24qa-kaltmiete[^"]*"[^>]*>([^<]+)</div>`),
+			regexp.MustCompile(`<span[^>]*class="[^"]*is24qa-kaltmiete[^"]*"[^>]*>([^<]+)</span>`),
+			regexp.MustCompile(`<dd[^>]*class="[^"]*is24qa-kaltmiete[^"]*"[^>]*>([^<]+)</dd>`),
+			regexp.MustCompile(`(?i)kaltmiete[^<]*?(\d+(?:\.\d{3})*(?:,\d+)?)\s*€`),
+			regexp.MustCompile(`(?i)miete[^<]*?(\d+(?:\.\d{3})*(?:,\d+)?)\s*€`),
+			regexp.MustCompile(`"rentBasePrice"\s*:\s*(\d+(?:\.\d+)?)`),
+			regexp.MustCompile(`"baseRent"\s*:\s*(\d+(?:\.\d+)?)`),
+			regexp.MustCompile(`"coldRent"\s*:\s*(\d+(?:\.\d+)?)`),
+			regexp.MustCompile(`"price"\s*:\s*\{\s*"value"\s*:\s*(\d+(?:\.\d+)?)`),
+		}
+		for _, pattern := range pricePatterns {
+			if matches := pattern.FindStringSubmatch(html); len(matches) > 1 {
+				if price := parsePrice(matches[1]); price > 0 {
+					listing.Price = price
+					break
+				}
+			}
 		}
 	}
 

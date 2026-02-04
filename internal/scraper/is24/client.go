@@ -101,6 +101,13 @@ func (c *Client) FetchExpose(ctx context.Context, is24ID string) (*domain.Listin
 func (c *Client) buildSearchURL(profile *domain.SearchProfile) string {
 	// Use custom search URL if provided
 	if profile.SearchURL != "" {
+		// Ensure custom URL also sorts by newest first
+		if !strings.Contains(profile.SearchURL, "sorting=") {
+			if strings.Contains(profile.SearchURL, "?") {
+				return profile.SearchURL + "&sorting=2"
+			}
+			return profile.SearchURL + "?sorting=2"
+		}
 		return profile.SearchURL
 	}
 
@@ -109,6 +116,9 @@ func (c *Client) buildSearchURL(profile *domain.SearchProfile) string {
 	u := fmt.Sprintf(baseURL+searchPath, city)
 
 	params := url.Values{}
+
+	// Sort by newest first (sorting=2)
+	params.Set("sorting", "2")
 
 	if profile.MinPrice > 0 {
 		params.Set("price", fmt.Sprintf("%d-", profile.MinPrice))

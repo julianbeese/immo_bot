@@ -74,7 +74,7 @@ func (g *Generator) Generate(listing *domain.Listing) (string, error) {
 
 const defaultTemplate = `Sehr geehrte Damen und Herren,
 
-wir sind Marie Wiegelmann und Julian Beese und interessieren uns sehr für Ihre angebotene Wohnung "{{.Title}}".
+wir sind Marie Wiegelmann und Julian Beese und interessieren uns sehr für Ihre angebotene Wohnung in {{if .District}}{{.District}}{{else}}{{.City}}{{end}}.
 
 {{.PersonalizedDetails}}
 

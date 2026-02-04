@@ -159,6 +159,14 @@ func (s *Scheduler) run(ctx context.Context) {
 func (s *Scheduler) poll(ctx context.Context) error {
 	s.logger.Info("starting poll cycle")
 
+	// Check if we're in quiet hours
+	if s.cfg.IsQuietTime() {
+		s.logger.Info("quiet hours active, skipping poll cycle",
+			"start", s.cfg.QuietHours.Start,
+			"end", s.cfg.QuietHours.End)
+		return nil
+	}
+
 	// Get active search profiles
 	profiles, err := s.repo.GetActiveSearchProfiles(ctx)
 	if err != nil {

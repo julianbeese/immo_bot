@@ -13,11 +13,20 @@ type Config struct {
 	DatabasePath string        `yaml:"database_path"`
 	LogLevel     string        `yaml:"log_level"`
 
-	IS24     IS24Config     `yaml:"is24"`
-	Telegram TelegramConfig `yaml:"telegram"`
-	OpenAI   OpenAIConfig   `yaml:"openai"`
-	Contact  ContactConfig  `yaml:"contact"`
-	Message  MessageConfig  `yaml:"message"`
+	IS24       IS24Config       `yaml:"is24"`
+	Telegram   TelegramConfig   `yaml:"telegram"`
+	OpenAI     OpenAIConfig     `yaml:"openai"`
+	Contact    ContactConfig    `yaml:"contact"`
+	Message    MessageConfig    `yaml:"message"`
+	QuietHours QuietHoursConfig `yaml:"quiet_hours"`
+}
+
+// QuietHoursConfig for defining when the bot should not send messages
+type QuietHoursConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Start    string `yaml:"start"`    // e.g. "22:00"
+	End      string `yaml:"end"`      // e.g. "07:00"
+	Timezone string `yaml:"timezone"` // e.g. "Europe/Berlin"
 }
 
 // IS24Config for ImmobilienScout24 settings
@@ -92,6 +101,12 @@ func DefaultConfig() *Config {
 		Message: MessageConfig{
 			TemplatePath: "configs/message_template.txt",
 		},
+		QuietHours: QuietHoursConfig{
+			Enabled:  true,
+			Start:    "22:00",
+			End:      "07:00",
+			Timezone: "Europe/Berlin",
+		},
 	}
 }
 
@@ -153,4 +168,71 @@ func (c *Config) Validate() error {
 	// IS24 cookie is required for scraping
 	// OpenAI is optional
 	return nil
+}
+
+// IsQuietTime checks if the current time is within quiet hours
+func (c *Config) IsQuietTime() bool {
+	if !c.QuietHours.Enabled {
+		return false
+	}
+
+	// Load timezone
+	loc, err := time.LoadLocation(c.QuietHours.Timezone)
+	if err != nil {
+		loc = time.Local
+	}
+
+	now := time.Now().In(loc)
+	currentMinutes := now.Hour()*60 + now.Minute()
+
+	// Parse start time
+	startHour, startMin := parseTimeString(c.QuietHours.Start)
+	startMinutes := startHour*60 + startMin
+
+	// Parse end time
+	endHour, endMin := parseTimeString(c.QuietHours.End)
+	endMinutes := endHour*60 + endMin
+
+	// Handle overnight quiet hours (e.g., 22:00 - 07:00)
+	if startMinutes > endMinutes {
+		// Quiet time spans midnight
+		return currentMinutes >= startMinutes || currentMinutes < endMinutes
+	}
+
+	// Same-day quiet hours (e.g., 12:00 - 14:00)
+	return currentMinutes >= startMinutes && currentMinutes < endMinutes
+}
+
+// parseTimeString parses "HH:MM" format and returns hour and minute
+func parseTimeString(s string) (int, int) {
+	var hour, min int
+	for i, part := range splitTime(s) {
+		n := 0
+		for _, c := range part {
+			if c >= '0' && c <= '9' {
+				n = n*10 + int(c-'0')
+			}
+		}
+		if i == 0 {
+			hour = n
+		} else {
+			min = n
+		}
+	}
+	return hour, min
+}
+
+func splitTime(s string) []string {
+	var parts []string
+	var current string
+	for _, c := range s {
+		if c == ':' {
+			parts = append(parts, current)
+			current = ""
+		} else {
+			current += string(c)
+		}
+	}
+	parts = append(parts, current)
+	return parts
 }

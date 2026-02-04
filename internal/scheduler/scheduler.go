@@ -33,8 +33,9 @@ type Scheduler struct {
 	contacter *contact.Submitter
 	logger    *slog.Logger
 
-	// Callback to check if auto-contact is enabled
+	// Callbacks to check contact mode
 	isAutoContactEnabled func() bool
+	isTestModeEnabled    func() bool
 
 	mu       sync.Mutex
 	running  bool
@@ -70,12 +71,18 @@ func NewScheduler(
 		contacter: contacter,
 		logger:    logger,
 		isAutoContactEnabled: func() bool { return false }, // Default: observation mode
+		isTestModeEnabled:    func() bool { return false },
 	}
 }
 
 // SetAutoContactCallback sets the callback to check if auto-contact is enabled
 func (s *Scheduler) SetAutoContactCallback(fn func() bool) {
 	s.isAutoContactEnabled = fn
+}
+
+// SetTestModeCallback sets the callback to check if test mode is enabled
+func (s *Scheduler) SetTestModeCallback(fn func() bool) {
+	s.isTestModeEnabled = fn
 }
 
 // GetStats returns current statistics
@@ -177,6 +184,14 @@ func (s *Scheduler) poll(ctx context.Context) error {
 		s.logger.Info("auto-contact enabled, processing uncontacted listings")
 		if err := s.sendContacts(ctx); err != nil {
 			s.logger.Error("contact sending failed", "error", err)
+		}
+	}
+
+	// Process test mode: show message previews without sending
+	if s.cfg.Contact.Enabled && s.isTestModeEnabled() {
+		s.logger.Info("test mode enabled, showing message previews")
+		if err := s.sendTestPreviews(ctx); err != nil {
+			s.logger.Error("test preview failed", "error", err)
 		}
 	}
 
@@ -356,6 +371,54 @@ func (s *Scheduler) sendContacts(ctx context.Context) error {
 		})
 
 		s.logger.Info("contact sent", "is24_id", listing.IS24ID)
+	}
+
+	return nil
+}
+
+func (s *Scheduler) sendTestPreviews(ctx context.Context) error {
+	listings, err := s.repo.GetUncontactedListings(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, listing := range listings {
+		// Generate message
+		message, err := s.messenger.Generate(&listing)
+		if err != nil {
+			s.logger.Error("message generation failed", "is24_id", listing.IS24ID, "error", err)
+			continue
+		}
+
+		// Enhance with AI if available
+		if s.enhancer != nil {
+			enhanced, err := s.enhancer.Enhance(ctx, message, &listing)
+			if err != nil {
+				s.logger.Warn("message enhancement failed, using base message", "error", err)
+			} else {
+				message = enhanced
+			}
+		}
+
+		// Send preview to Telegram
+		if err := s.notifier.NotifyMessagePreview(ctx, &listing, message); err != nil {
+			s.logger.Error("message preview notification failed", "is24_id", listing.IS24ID, "error", err)
+			continue
+		}
+
+		// Mark as contacted so we don't show preview again
+		if err := s.repo.MarkListingContacted(ctx, listing.ID); err != nil {
+			s.logger.Error("mark contacted failed", "id", listing.ID, "error", err)
+		}
+
+		s.repo.LogActivity(ctx, &domain.ActivityLog{
+			Action:     domain.ActionContactSent,
+			EntityType: "listing",
+			EntityID:   listing.ID,
+			Details:    "test_mode_preview",
+		})
+
+		s.logger.Info("test preview sent", "is24_id", listing.IS24ID)
 	}
 
 	return nil

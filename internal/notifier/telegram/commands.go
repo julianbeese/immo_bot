@@ -8,14 +8,23 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+// ContactMode represents the contact behavior mode
+type ContactMode int
+
+const (
+	ContactModeOff  ContactMode = iota // Observation only
+	ContactModeTest                    // Show message preview, don't send
+	ContactModeOn                      // Actually send contacts
+)
+
 // BotController handles Telegram commands and controls bot state
 type BotController struct {
 	bot           *tgbotapi.BotAPI
 	chatID        int64
 	enabled       bool
 
-	mu            sync.RWMutex
-	autoContact   bool
+	mu          sync.RWMutex
+	contactMode ContactMode
 
 	// Callbacks
 	onStatusRequest func() string
@@ -25,7 +34,7 @@ type BotController struct {
 // NewBotController creates a new bot controller with command handling
 func NewBotController(botToken string, chatID int64, enabled bool) (*BotController, error) {
 	if !enabled || botToken == "" {
-		return &BotController{enabled: false, autoContact: false}, nil
+		return &BotController{enabled: false, contactMode: ContactModeOff}, nil
 	}
 
 	bot, err := tgbotapi.NewBotAPI(botToken)
@@ -37,7 +46,7 @@ func NewBotController(botToken string, chatID int64, enabled bool) (*BotControll
 		bot:         bot,
 		chatID:      chatID,
 		enabled:     true,
-		autoContact: false, // Start in observation mode
+		contactMode: ContactModeOff, // Start in observation mode
 	}, nil
 }
 
@@ -88,11 +97,14 @@ func (c *BotController) handleCommand(msg *tgbotapi.Message) {
 	case "status":
 		response = c.statusMessage()
 	case "contact_on":
-		c.SetAutoContact(true)
+		c.SetContactMode(ContactModeOn)
 		response = "✅ <b>Auto-Kontakt aktiviert</b>\n\nNeue Wohnungen werden automatisch angeschrieben."
 	case "contact_off":
-		c.SetAutoContact(false)
-		response = "⏸ <b>Auto-Kontakt deaktiviert</b>\n\nBeobachtungsmodus aktiv. Neue Wohnungen werden nur gemeldet."
+		c.SetContactMode(ContactModeOff)
+		response = "⏸ <b>Beobachtungsmodus</b>\n\nNeue Wohnungen werden nur gemeldet, keine Kontaktaufnahme."
+	case "contact_test":
+		c.SetContactMode(ContactModeTest)
+		response = "🧪 <b>Test-Modus aktiviert</b>\n\nNeue Wohnungen werden gemeldet und die Nachricht wird dir als Vorschau gezeigt (nicht gesendet)."
 	case "stats":
 		if c.onStatsRequest != nil {
 			response = c.onStatsRequest()
@@ -113,6 +125,7 @@ func (c *BotController) helpMessage() string {
 
 /status - Aktueller Bot-Status
 /contact_on - Auto-Kontakt aktivieren
+/contact_test - Test-Modus (Nachricht-Vorschau)
 /contact_off - Nur beobachten (kein Kontakt)
 /stats - Statistiken anzeigen
 /help - Diese Hilfe`
@@ -120,11 +133,16 @@ func (c *BotController) helpMessage() string {
 
 func (c *BotController) statusMessage() string {
 	c.mu.RLock()
-	autoContact := c.autoContact
+	contactMode := c.contactMode
 	c.mu.RUnlock()
 
-	mode := "⏸ Beobachtungsmodus"
-	if autoContact {
+	var mode string
+	switch contactMode {
+	case ContactModeOff:
+		mode = "⏸ Beobachtungsmodus"
+	case ContactModeTest:
+		mode = "🧪 Test-Modus (Nachricht-Vorschau)"
+	case ContactModeOn:
 		mode = "✅ Auto-Kontakt aktiv"
 	}
 
@@ -132,7 +150,7 @@ func (c *BotController) statusMessage() string {
 
 <b>Modus:</b> %s
 
-Nutze /contact_on oder /contact_off um den Modus zu wechseln.`, mode)
+Befehle: /contact_on | /contact_test | /contact_off`, mode)
 
 	if c.onStatusRequest != nil {
 		status += "\n\n" + c.onStatusRequest()
@@ -141,17 +159,31 @@ Nutze /contact_on oder /contact_off um den Modus zu wechseln.`, mode)
 	return status
 }
 
-// IsAutoContactEnabled returns whether auto-contact is enabled
+// IsAutoContactEnabled returns whether auto-contact is enabled (actually sends messages)
 func (c *BotController) IsAutoContactEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.autoContact
+	return c.contactMode == ContactModeOn
 }
 
-// SetAutoContact enables or disables auto-contact
-func (c *BotController) SetAutoContact(enabled bool) {
+// IsTestModeEnabled returns whether test mode is enabled (shows message preview)
+func (c *BotController) IsTestModeEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.contactMode == ContactModeTest
+}
+
+// GetContactMode returns the current contact mode
+func (c *BotController) GetContactMode() ContactMode {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.contactMode
+}
+
+// SetContactMode sets the contact mode
+func (c *BotController) SetContactMode(mode ContactMode) {
 	c.mu.Lock()
-	c.autoContact = enabled
+	c.contactMode = mode
 	c.mu.Unlock()
 }
 

@@ -238,3 +238,32 @@ func (n *Notifier) SendRawMessage(ctx context.Context, text string) error {
 	_, err := n.bot.Send(msg)
 	return err
 }
+
+// NotifyMessagePreview sends a preview of the message that would be sent to a listing
+func (n *Notifier) NotifyMessagePreview(ctx context.Context, listing *domain.Listing, message string) error {
+	if !n.enabled {
+		return nil
+	}
+
+	text := fmt.Sprintf(
+		"🧪 <b>Test-Modus: Nachricht-Vorschau</b>\n\n"+
+			"<b>Wohnung:</b> %s\n"+
+			"📍 %s\n"+
+			"💰 %d € | 🚪 %.1f Zimmer\n"+
+			"🔗 %s\n\n"+
+			"<b>━━━ Nachricht ━━━</b>\n\n"+
+			"<pre>%s</pre>",
+		escapeHTML(listing.Title),
+		escapeHTML(listing.Address),
+		listing.Price,
+		listing.Rooms,
+		listing.URL,
+		escapeHTML(message),
+	)
+
+	msg := tgbotapi.NewMessage(n.chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
+
+	_, err := n.bot.Send(msg)
+	return err
+}

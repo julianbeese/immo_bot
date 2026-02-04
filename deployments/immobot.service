@@ -1,0 +1,25 @@
+[Unit]
+Description=ImmoBot - ImmobilienScout24 Apartment Bot
+After=network.target
+
+[Service]
+Type=simple
+User=immobot
+Group=immobot
+WorkingDirectory=/opt/immobot
+ExecStart=/opt/immobot/immobot -config /opt/immobot/configs/config.yaml
+Restart=always
+RestartSec=10
+
+# Environment
+Environment=LOG_LEVEL=info
+EnvironmentFile=/opt/immobot/.env
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/immobot/data
+
+[Install]
+WantedBy=multi-user.target

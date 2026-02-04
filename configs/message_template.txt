@@ -1,0 +1,16 @@
+Sehr geehrte Damen und Herren,
+
+wir sind Marie Wiegelmann und Julian Beese und interessieren uns sehr für Ihre angebotene Wohnung "{{.Title}}".
+
+{{.PersonalizedDetails}}
+
+Wir arbeiten beide in der Unternehmensberatung (Nettohaushaltseinkommen ca. 7.400€) und sind auf der Suche nach einer größeren Wohnung in zentraler Lage, in der wir uns langfristig wohlfühlen können.
+
+Unsere Selbstauskunft, Bonitätsbescheinigung etc. finden Sie in unserem Profil.
+
+Über eine Einladung zur Besichtigung würden wir uns sehr freuen. Gerne können Sie mich auch unter 0151 67660667 telefonisch erreichen.
+
+Vielen Dank für Ihre Zeit.
+
+Beste Grüße
+Marie Wiegelmann & Julian Beese

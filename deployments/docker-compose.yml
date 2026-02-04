@@ -1,0 +1,46 @@
+services:
+  immobot:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    container_name: immobot
+    restart: unless-stopped
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+    # Shared memory for Chrome
+    shm_size: 256mb
+
+    # Volumes
+    volumes:
+      - ../configs:/app/configs:ro
+      - immobot_data:/app/data
+
+    # Environment variables (secrets)
+    environment:
+      - TZ=Europe/Berlin
+      - LOG_LEVEL=info
+      # Set these via .env file or override
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - IS24_COOKIE=${IS24_COOKIE:-}
+
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  immobot_data:
+    driver: local

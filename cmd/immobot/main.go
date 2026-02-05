@@ -216,12 +216,26 @@ func main() {
 	if notifier.IsEnabled() {
 		startupMsg := fmt.Sprintf(`🚀 <b>ImmoBot gestartet</b>
 
-<b>Modus:</b> ⏸ Beobachtungsmodus
-<b>Aktive Suchprofile:</b> %d
+<b>Kontakt:</b> ✅ Auto-Kontakt aktiv
+<b>Ruhezeiten:</b> 🌙 An (22:00-07:00)
+<b>Suchprofile:</b> %d
 <b>Poll-Intervall:</b> %s
 
-Nutze /contact_on um Auto-Kontakt zu aktivieren.
-Nutze /help für alle Befehle.`, len(profiles), cfg.PollInterval)
+<b>━━━ Befehle ━━━</b>
+
+<b>Kontakt:</b>
+/contact_on - Auto-Kontakt an
+/contact_test - Test-Modus (Vorschau)
+/contact_off - Nur beobachten
+
+<b>Ruhezeiten:</b>
+/quiet_on - Ruhezeiten an
+/quiet_off - 24/7 aktiv
+
+<b>Info:</b>
+/status - Aktueller Status
+/stats - Statistiken
+/help - Alle Befehle`, len(profiles), cfg.PollInterval)
 
 		notifier.SendRawMessage(ctx, startupMsg)
 	}

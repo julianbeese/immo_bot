@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
@@ -32,35 +33,74 @@ func NewBrowserClient(cookie string, rateLimiter *antidetect.RateLimiter, chrome
 	}
 }
 
-// Search performs a search using browser automation
+// Search performs a search using browser automation with pagination
 func (c *BrowserClient) Search(ctx context.Context, profile *domain.SearchProfile) ([]domain.Listing, error) {
 	searchURL := profile.SearchURL
 	if searchURL == "" {
 		searchURL = fmt.Sprintf("https://www.immobilienscout24.de/Suche/de/%s/wohnung-mieten", profile.City)
 	}
 
-	c.rateLimiter.Wait()
+	var allListings []domain.Listing
+	seenIDs := make(map[string]bool)
+	maxPages := 5 // Limit to avoid too many requests
 
-	html, err := c.fetchPage(ctx, searchURL)
-	if err != nil {
-		return nil, fmt.Errorf("fetch search: %w", err)
+	for page := 1; page <= maxPages; page++ {
+		pageURL := c.buildPageURL(searchURL, page)
+
+		c.rateLimiter.Wait()
+
+		html, err := c.fetchPage(ctx, pageURL)
+		if err != nil {
+			return nil, fmt.Errorf("fetch search page %d: %w", page, err)
+		}
+
+		// Debug: save HTML to file
+		if c.debug {
+			os.WriteFile(fmt.Sprintf("/tmp/is24_search_page%d.html", page), []byte(html), 0644)
+		}
+
+		listings, err := c.parser.ParseSearchResults([]byte(html))
+		if err != nil {
+			return nil, fmt.Errorf("parse search page %d: %w", page, err)
+		}
+
+		// No more results on this page
+		if len(listings) == 0 {
+			break
+		}
+
+		// Deduplicate and add
+		newOnPage := 0
+		for _, l := range listings {
+			if !seenIDs[l.IS24ID] {
+				seenIDs[l.IS24ID] = true
+				l.SearchProfileID = profile.ID
+				allListings = append(allListings, l)
+				newOnPage++
+			}
+		}
+
+		// If we got very few new results, probably last page
+		if newOnPage < 5 {
+			break
+		}
 	}
 
-	// Debug: save HTML to file
-	if c.debug {
-		os.WriteFile("/tmp/is24_search.html", []byte(html), 0644)
+	return allListings, nil
+}
+
+// buildPageURL adds pagination parameter to the URL
+func (c *BrowserClient) buildPageURL(baseURL string, page int) string {
+	if page == 1 {
+		return baseURL
 	}
 
-	listings, err := c.parser.ParseSearchResults([]byte(html))
-	if err != nil {
-		return nil, fmt.Errorf("parse search: %w", err)
+	// IS24 uses pagenumber parameter
+	separator := "?"
+	if strings.Contains(baseURL, "?") {
+		separator = "&"
 	}
-
-	for i := range listings {
-		listings[i].SearchProfileID = profile.ID
-	}
-
-	return listings, nil
+	return fmt.Sprintf("%s%spagenumber=%d", baseURL, separator, page)
 }
 
 // FetchExpose fetches detailed listing info

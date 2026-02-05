@@ -35,7 +35,7 @@ type BotController struct {
 // NewBotController creates a new bot controller with command handling
 func NewBotController(botToken string, chatID int64, enabled bool) (*BotController, error) {
 	if !enabled || botToken == "" {
-		return &BotController{enabled: false, contactMode: ContactModeOff}, nil
+		return &BotController{enabled: false, contactMode: ContactModeOn}, nil
 	}
 
 	bot, err := tgbotapi.NewBotAPI(botToken)
@@ -47,7 +47,8 @@ func NewBotController(botToken string, chatID int64, enabled bool) (*BotControll
 		bot:         bot,
 		chatID:      chatID,
 		enabled:     true,
-		contactMode: ContactModeOff, // Start in observation mode
+		contactMode: ContactModeOn,  // Start in auto-contact mode
+		quietHours:  true,           // Quiet hours enabled by default
 	}, nil
 }
 

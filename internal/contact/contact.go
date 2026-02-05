@@ -3,8 +3,10 @@ package contact
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"github.com/julianbeese/immo_bot/internal/antidetect"
 	"github.com/julianbeese/immo_bot/internal/domain"
@@ -101,27 +103,93 @@ func (s *Submitter) setCookies() chromedp.ActionFunc {
 			return nil
 		}
 
-		// Parse and set cookies
-		// IS24 cookies are set via network domain
-		return chromedp.Run(ctx,
-			chromedp.ActionFunc(func(ctx context.Context) error {
-				// Execute JavaScript to set cookies
-				setCookieJS := fmt.Sprintf(`document.cookie = "%s"`, s.cookie)
-				return chromedp.Evaluate(setCookieJS, nil).Do(ctx)
-			}),
-		)
+		// Parse cookie string and set via network domain
+		cookies := parseCookieString(s.cookie)
+		for _, cookie := range cookies {
+			err := network.SetCookie(cookie.Name, cookie.Value).
+				WithDomain(".immobilienscout24.de").
+				WithPath("/").
+				Do(ctx)
+			if err != nil {
+				return fmt.Errorf("set cookie %s: %w", cookie.Name, err)
+			}
+		}
+		return nil
 	}
+}
+
+// Cookie represents a parsed cookie
+type Cookie struct {
+	Name  string
+	Value string
+}
+
+// parseCookieString parses a cookie header string into individual cookies
+func parseCookieString(cookieStr string) []Cookie {
+	var cookies []Cookie
+	pairs := strings.Split(cookieStr, ";")
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		idx := strings.Index(pair, "=")
+		if idx > 0 {
+			name := strings.TrimSpace(pair[:idx])
+			value := strings.TrimSpace(pair[idx+1:])
+			cookies = append(cookies, Cookie{Name: name, Value: value})
+		}
+	}
+	return cookies
 }
 
 func (s *Submitter) fillFormWithDelay(message string) chromedp.ActionFunc {
 	return func(ctx context.Context) error {
+		// Try to select "Mit Profil bewerben" (Apply with profile) if available
+		profileSelectors := []string{
+			`input[name="applyWithProfile"][value="true"]`,
+			`input[type="radio"][value="true"]`,
+			`label:contains("Mit Profil") input`,
+			`input[data-qa="applyWithProfile"]`,
+		}
+		for _, sel := range profileSelectors {
+			_ = chromedp.Run(ctx, chromedp.Click(sel, chromedp.ByQuery))
+		}
+
+		time.Sleep(s.behavior.ActionPause())
+
+		// Select Anrede (Salutation) - "Frau" (Mrs.)
+		anredeSelectors := []string{
+			`select[name="salutation"]`,
+			`select[name="contactFormMessage.salutation"]`,
+			`select[data-qa="salutation"]`,
+			`.is24qa-salutation select`,
+		}
+		for _, sel := range anredeSelectors {
+			// Try to select "Frau" option
+			err := chromedp.Run(ctx,
+				chromedp.SetValue(sel, "FEMALE", chromedp.ByQuery),
+			)
+			if err == nil {
+				break
+			}
+			// Alternative: try clicking and selecting
+			_ = chromedp.Run(ctx,
+				chromedp.Click(sel, chromedp.ByQuery),
+				chromedp.Sleep(200*time.Millisecond),
+				chromedp.SendKeys(sel, "Frau", chromedp.ByQuery),
+			)
+		}
+
+		time.Sleep(s.behavior.ActionPause())
+
 		// Try different form field selectors (IS24 changes these)
 		nameSelectors := []string{
 			`input[name="contactFormMessage.fullName"]`,
-			`input[data-qa="sendButton"]`,
 			`input[name="name"]`,
 			`#contactForm-name`,
 			`.is24qa-name input`,
+			`input[data-qa="fullName"]`,
 		}
 
 		emailSelectors := []string{
@@ -130,6 +198,7 @@ func (s *Submitter) fillFormWithDelay(message string) chromedp.ActionFunc {
 			`#contactForm-email`,
 			`.is24qa-email input`,
 			`input[type="email"]`,
+			`input[data-qa="emailAddress"]`,
 		}
 
 		phoneSelectors := []string{
@@ -138,6 +207,7 @@ func (s *Submitter) fillFormWithDelay(message string) chromedp.ActionFunc {
 			`#contactForm-phone`,
 			`.is24qa-phone input`,
 			`input[type="tel"]`,
+			`input[data-qa="phoneNumber"]`,
 		}
 
 		messageSelectors := []string{
@@ -145,6 +215,7 @@ func (s *Submitter) fillFormWithDelay(message string) chromedp.ActionFunc {
 			`textarea[name="message"]`,
 			`#contactForm-message`,
 			`.is24qa-message textarea`,
+			`textarea[data-qa="message"]`,
 			`textarea`,
 		}
 

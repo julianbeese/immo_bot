@@ -126,11 +126,30 @@ func main() {
 	// Initialize contact submitter
 	var contacter *contact.Submitter
 	if cfg.Contact.Enabled {
+		profile := contact.Profile{
+			Salutation:    cfg.Contact.Profile.Salutation,
+			FirstName:     cfg.Contact.Profile.FirstName,
+			LastName:      cfg.Contact.Profile.LastName,
+			Email:         cfg.Contact.Profile.Email,
+			Phone:         cfg.Contact.Profile.Phone,
+			Street:        cfg.Contact.Profile.Street,
+			HouseNumber:   cfg.Contact.Profile.HouseNumber,
+			PostalCode:    cfg.Contact.Profile.PostalCode,
+			City:          cfg.Contact.Profile.City,
+			Adults:        cfg.Contact.Profile.Adults,
+			Children:      cfg.Contact.Profile.Children,
+			Pets:          cfg.Contact.Profile.Pets,
+			Income:        cfg.Contact.Profile.Income,
+			MoveInDate:    cfg.Contact.Profile.MoveInDate,
+			Employment:    cfg.Contact.Profile.Employment,
+			RentArrears:   cfg.Contact.Profile.RentArrears,
+			Insolvency:    cfg.Contact.Profile.Insolvency,
+			Smoker:        cfg.Contact.Profile.Smoker,
+			CommercialUse: cfg.Contact.Profile.CommercialUse,
+		}
 		contacter = contact.NewSubmitter(
 			cfg.IS24.Cookie,
-			cfg.Message.SenderName,
-			cfg.Message.SenderEmail,
-			cfg.Message.SenderPhone,
+			profile,
 			cfg.Contact.ChromePath,
 			humanBehavior,
 		)

@@ -58,6 +58,30 @@ type ContactConfig struct {
 	TypeDelay    time.Duration `yaml:"type_delay"`
 	ActionDelay  time.Duration `yaml:"action_delay"`
 	ChromePath   string        `yaml:"chrome_path"`
+	Profile      ContactProfile `yaml:"profile"`
+}
+
+// ContactProfile contains applicant information for IS24 forms
+type ContactProfile struct {
+	Salutation       string `yaml:"salutation"`        // FEMALE or MALE
+	FirstName        string `yaml:"first_name"`
+	LastName         string `yaml:"last_name"`
+	Email            string `yaml:"email"`
+	Phone            string `yaml:"phone"`
+	Street           string `yaml:"street"`
+	HouseNumber      string `yaml:"house_number"`
+	PostalCode       string `yaml:"postal_code"`
+	City             string `yaml:"city"`
+	Adults           int    `yaml:"adults"`
+	Children         int    `yaml:"children"`
+	Pets             bool   `yaml:"pets"`
+	Income           int    `yaml:"income"`             // Monthly net household income
+	MoveInDate       string `yaml:"move_in_date"`       // e.g. "flexibel" or date
+	Employment       string `yaml:"employment"`         // e.g. "Unbefristet"
+	RentArrears      bool   `yaml:"rent_arrears"`       // Mietrückstände
+	Insolvency       bool   `yaml:"insolvency"`         // Insolvenzverfahren
+	Smoker           bool   `yaml:"smoker"`
+	CommercialUse    bool   `yaml:"commercial_use"`
 }
 
 // MessageConfig for contact message templates
@@ -97,6 +121,27 @@ func DefaultConfig() *Config {
 			Enabled:     true,
 			TypeDelay:   50 * time.Millisecond,
 			ActionDelay: 1 * time.Second,
+			Profile: ContactProfile{
+				Salutation:    "FEMALE",
+				FirstName:     "Marie",
+				LastName:      "Wiegelmann",
+				Email:         "marie.wiegelmann@outlook.com",
+				Phone:         "+49 151 67660667",
+				Street:        "Erzgießereistraße",
+				HouseNumber:   "32",
+				PostalCode:    "80335",
+				City:          "München",
+				Adults:        2,
+				Children:      0,
+				Pets:          false,
+				Income:        7500,
+				MoveInDate:    "flexibel",
+				Employment:    "Unbefristet",
+				RentArrears:   false,
+				Insolvency:    false,
+				Smoker:        false,
+				CommercialUse: false,
+			},
 		},
 		Message: MessageConfig{
 			TemplatePath: "configs/message_template.txt",

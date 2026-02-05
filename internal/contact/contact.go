@@ -12,25 +12,44 @@ import (
 	"github.com/julianbeese/immo_bot/internal/domain"
 )
 
+// Profile contains applicant information
+type Profile struct {
+	Salutation    string
+	FirstName     string
+	LastName      string
+	Email         string
+	Phone         string
+	Street        string
+	HouseNumber   string
+	PostalCode    string
+	City          string
+	Adults        int
+	Children      int
+	Pets          bool
+	Income        int
+	MoveInDate    string
+	Employment    string
+	RentArrears   bool
+	Insolvency    bool
+	Smoker        bool
+	CommercialUse bool
+}
+
 // Submitter handles contact form submission via browser automation
 type Submitter struct {
-	cookie      string
-	behavior    *antidetect.HumanBehavior
-	senderName  string
-	senderEmail string
-	senderPhone string
-	chromePath  string
+	cookie     string
+	behavior   *antidetect.HumanBehavior
+	profile    Profile
+	chromePath string
 }
 
 // NewSubmitter creates a new contact form submitter
-func NewSubmitter(cookie, senderName, senderEmail, senderPhone, chromePath string, behavior *antidetect.HumanBehavior) *Submitter {
+func NewSubmitter(cookie string, profile Profile, chromePath string, behavior *antidetect.HumanBehavior) *Submitter {
 	return &Submitter{
-		cookie:      cookie,
-		behavior:    behavior,
-		senderName:  senderName,
-		senderEmail: senderEmail,
-		senderPhone: senderPhone,
-		chromePath:  chromePath,
+		cookie:     cookie,
+		behavior:   behavior,
+		profile:    profile,
+		chromePath: chromePath,
 	}
 }
 
@@ -145,121 +164,231 @@ func parseCookieString(cookieStr string) []Cookie {
 
 func (s *Submitter) fillFormWithDelay(message string) chromedp.ActionFunc {
 	return func(ctx context.Context) error {
+		p := s.profile
+
 		// Try to select "Mit Profil bewerben" (Apply with profile) if available
-		profileSelectors := []string{
+		s.tryClick(ctx, []string{
 			`input[name="applyWithProfile"][value="true"]`,
 			`input[type="radio"][value="true"]`,
 			`label:contains("Mit Profil") input`,
 			`input[data-qa="applyWithProfile"]`,
-		}
-		for _, sel := range profileSelectors {
-			_ = chromedp.Run(ctx, chromedp.Click(sel, chromedp.ByQuery))
-		}
-
+		})
 		time.Sleep(s.behavior.ActionPause())
 
-		// Select Anrede (Salutation) - "Frau" (Mrs.)
-		anredeSelectors := []string{
+		// Select Anrede (Salutation)
+		s.trySelect(ctx, []string{
 			`select[name="salutation"]`,
 			`select[name="contactFormMessage.salutation"]`,
 			`select[data-qa="salutation"]`,
-			`.is24qa-salutation select`,
-		}
-		for _, sel := range anredeSelectors {
-			// Try to select "Frau" option
-			err := chromedp.Run(ctx,
-				chromedp.SetValue(sel, "FEMALE", chromedp.ByQuery),
-			)
-			if err == nil {
-				break
-			}
-			// Alternative: try clicking and selecting
-			_ = chromedp.Run(ctx,
-				chromedp.Click(sel, chromedp.ByQuery),
-				chromedp.Sleep(200*time.Millisecond),
-				chromedp.SendKeys(sel, "Frau", chromedp.ByQuery),
-			)
-		}
-
+		}, p.Salutation)
 		time.Sleep(s.behavior.ActionPause())
 
-		// Try different form field selectors (IS24 changes these)
-		nameSelectors := []string{
+		// Fill Vorname (First name)
+		s.tryType(ctx, []string{
+			`input[name="firstName"]`,
+			`input[name="contactFormMessage.firstName"]`,
+			`input[data-qa="firstName"]`,
+		}, p.FirstName)
+
+		// Fill Nachname (Last name)
+		s.tryType(ctx, []string{
+			`input[name="lastName"]`,
+			`input[name="contactFormMessage.lastName"]`,
+			`input[data-qa="lastName"]`,
+		}, p.LastName)
+
+		// Fill full name if separate fields don't exist
+		fullName := p.FirstName + " " + p.LastName
+		s.tryType(ctx, []string{
 			`input[name="contactFormMessage.fullName"]`,
 			`input[name="name"]`,
-			`#contactForm-name`,
-			`.is24qa-name input`,
 			`input[data-qa="fullName"]`,
-		}
+		}, fullName)
 
-		emailSelectors := []string{
+		// Fill Email
+		s.tryType(ctx, []string{
 			`input[name="contactFormMessage.emailAddress"]`,
 			`input[name="email"]`,
-			`#contactForm-email`,
-			`.is24qa-email input`,
 			`input[type="email"]`,
 			`input[data-qa="emailAddress"]`,
-		}
+		}, p.Email)
 
-		phoneSelectors := []string{
+		// Fill Telefon
+		s.tryType(ctx, []string{
 			`input[name="contactFormMessage.phoneNumber"]`,
 			`input[name="phone"]`,
-			`#contactForm-phone`,
-			`.is24qa-phone input`,
 			`input[type="tel"]`,
 			`input[data-qa="phoneNumber"]`,
+		}, p.Phone)
+
+		// Fill Straße (Street)
+		s.tryType(ctx, []string{
+			`input[name="street"]`,
+			`input[name="contactFormMessage.street"]`,
+			`input[data-qa="street"]`,
+		}, p.Street)
+
+		// Fill Hausnummer (House number)
+		s.tryType(ctx, []string{
+			`input[name="houseNumber"]`,
+			`input[name="contactFormMessage.houseNumber"]`,
+			`input[data-qa="houseNumber"]`,
+		}, p.HouseNumber)
+
+		// Fill PLZ (Postal code)
+		s.tryType(ctx, []string{
+			`input[name="postalCode"]`,
+			`input[name="zipCode"]`,
+			`input[name="contactFormMessage.postalCode"]`,
+			`input[data-qa="postalCode"]`,
+		}, p.PostalCode)
+
+		// Fill Ort (City)
+		s.tryType(ctx, []string{
+			`input[name="city"]`,
+			`input[name="contactFormMessage.city"]`,
+			`input[data-qa="city"]`,
+		}, p.City)
+
+		// Fill Anzahl Erwachsene (Adults)
+		s.tryType(ctx, []string{
+			`input[name="numberOfAdults"]`,
+			`input[name="adults"]`,
+			`input[data-qa="numberOfAdults"]`,
+		}, fmt.Sprintf("%d", p.Adults))
+
+		// Fill Anzahl Kinder (Children)
+		s.tryType(ctx, []string{
+			`input[name="numberOfChildren"]`,
+			`input[name="children"]`,
+			`input[data-qa="numberOfChildren"]`,
+		}, fmt.Sprintf("%d", p.Children))
+
+		// Haustiere (Pets) - select No
+		if !p.Pets {
+			s.tryClick(ctx, []string{
+				`input[name="pets"][value="false"]`,
+				`input[name="hasPets"][value="NO"]`,
+				`input[data-qa="pets-no"]`,
+			})
+			s.trySelect(ctx, []string{
+				`select[name="pets"]`,
+				`select[name="hasPets"]`,
+			}, "NO")
 		}
 
-		messageSelectors := []string{
+		// Fill Einkommen (Income)
+		s.tryType(ctx, []string{
+			`input[name="income"]`,
+			`input[name="monthlyIncome"]`,
+			`input[name="netHouseholdIncome"]`,
+			`input[data-qa="income"]`,
+		}, fmt.Sprintf("%d", p.Income))
+
+		// Fill Einzugstermin (Move-in date)
+		s.tryType(ctx, []string{
+			`input[name="moveInDate"]`,
+			`input[name="earliestMoveInDate"]`,
+			`input[data-qa="moveInDate"]`,
+		}, p.MoveInDate)
+		s.trySelect(ctx, []string{
+			`select[name="moveInDate"]`,
+			`select[name="earliestMoveInDate"]`,
+		}, "FLEXIBLE")
+
+		// Beschäftigungsstatus (Employment)
+		s.trySelect(ctx, []string{
+			`select[name="employmentStatus"]`,
+			`select[name="employment"]`,
+			`select[data-qa="employmentStatus"]`,
+		}, "PERMANENT")
+
+		// Mietrückstände (Rent arrears) - No
+		if !p.RentArrears {
+			s.tryClick(ctx, []string{
+				`input[name="rentArrears"][value="false"]`,
+				`input[name="hasRentArrears"][value="NO"]`,
+				`input[data-qa="rentArrears-no"]`,
+			})
+			s.trySelect(ctx, []string{
+				`select[name="rentArrears"]`,
+			}, "NO")
+		}
+
+		// Insolvenzverfahren (Insolvency) - No
+		if !p.Insolvency {
+			s.tryClick(ctx, []string{
+				`input[name="insolvency"][value="false"]`,
+				`input[name="hasInsolvency"][value="NO"]`,
+				`input[data-qa="insolvency-no"]`,
+			})
+			s.trySelect(ctx, []string{
+				`select[name="insolvency"]`,
+			}, "NO")
+		}
+
+		// Raucher (Smoker) - No
+		if !p.Smoker {
+			s.tryClick(ctx, []string{
+				`input[name="smoker"][value="false"]`,
+				`input[name="isSmoker"][value="NO"]`,
+				`input[data-qa="smoker-no"]`,
+			})
+			s.trySelect(ctx, []string{
+				`select[name="smoker"]`,
+			}, "NO")
+		}
+
+		// Gewerbliche Nutzung (Commercial use) - No
+		if !p.CommercialUse {
+			s.tryClick(ctx, []string{
+				`input[name="commercialUse"][value="false"]`,
+				`input[name="isCommercialUse"][value="NO"]`,
+				`input[data-qa="commercialUse-no"]`,
+			})
+			s.trySelect(ctx, []string{
+				`select[name="commercialUse"]`,
+			}, "NO")
+		}
+
+		time.Sleep(s.behavior.ActionPause())
+
+		// Fill message (always last)
+		s.tryType(ctx, []string{
 			`textarea[name="contactFormMessage.message"]`,
 			`textarea[name="message"]`,
-			`#contactForm-message`,
-			`.is24qa-message textarea`,
 			`textarea[data-qa="message"]`,
 			`textarea`,
-		}
-
-		// Fill name
-		if s.senderName != "" {
-			for _, sel := range nameSelectors {
-				if err := s.typeWithDelay(ctx, sel, s.senderName); err == nil {
-					break
-				}
-			}
-		}
-
-		time.Sleep(s.behavior.ActionPause())
-
-		// Fill email
-		if s.senderEmail != "" {
-			for _, sel := range emailSelectors {
-				if err := s.typeWithDelay(ctx, sel, s.senderEmail); err == nil {
-					break
-				}
-			}
-		}
-
-		time.Sleep(s.behavior.ActionPause())
-
-		// Fill phone
-		if s.senderPhone != "" {
-			for _, sel := range phoneSelectors {
-				if err := s.typeWithDelay(ctx, sel, s.senderPhone); err == nil {
-					break
-				}
-			}
-		}
-
-		time.Sleep(s.behavior.ActionPause())
-
-		// Fill message
-		for _, sel := range messageSelectors {
-			if err := s.typeWithDelay(ctx, sel, message); err == nil {
-				break
-			}
-		}
+		}, message)
 
 		return nil
+	}
+}
+
+// Helper: try to click any of the selectors
+func (s *Submitter) tryClick(ctx context.Context, selectors []string) {
+	for _, sel := range selectors {
+		_ = chromedp.Run(ctx, chromedp.Click(sel, chromedp.ByQuery))
+	}
+}
+
+// Helper: try to select value in any of the selectors
+func (s *Submitter) trySelect(ctx context.Context, selectors []string, value string) {
+	for _, sel := range selectors {
+		_ = chromedp.Run(ctx, chromedp.SetValue(sel, value, chromedp.ByQuery))
+	}
+}
+
+// Helper: try to type in any of the selectors
+func (s *Submitter) tryType(ctx context.Context, selectors []string, value string) {
+	if value == "" {
+		return
+	}
+	for _, sel := range selectors {
+		if err := s.typeWithDelay(ctx, sel, value); err == nil {
+			time.Sleep(s.behavior.ActionPause())
+			return
+		}
 	}
 }
 

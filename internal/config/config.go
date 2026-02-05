@@ -102,7 +102,7 @@ func DefaultConfig() *Config {
 			TemplatePath: "configs/message_template.txt",
 		},
 		QuietHours: QuietHoursConfig{
-			Enabled:  true,
+			Enabled:  false, // Disabled by default
 			Start:    "22:00",
 			End:      "07:00",
 			Timezone: "Europe/Berlin",

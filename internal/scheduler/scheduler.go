@@ -36,6 +36,7 @@ type Scheduler struct {
 	// Callbacks to check contact mode
 	isAutoContactEnabled func() bool
 	isTestModeEnabled    func() bool
+	isQuietHoursEnabled  func() *bool // nil = use config, non-nil = override
 
 	mu       sync.Mutex
 	running  bool
@@ -72,6 +73,7 @@ func NewScheduler(
 		logger:    logger,
 		isAutoContactEnabled: func() bool { return false }, // Default: observation mode
 		isTestModeEnabled:    func() bool { return false },
+		isQuietHoursEnabled:  func() *bool { return nil }, // nil = use config
 	}
 }
 
@@ -83,6 +85,11 @@ func (s *Scheduler) SetAutoContactCallback(fn func() bool) {
 // SetTestModeCallback sets the callback to check if test mode is enabled
 func (s *Scheduler) SetTestModeCallback(fn func() bool) {
 	s.isTestModeEnabled = fn
+}
+
+// SetQuietHoursCallback sets the callback to check if quiet hours override is set
+func (s *Scheduler) SetQuietHoursCallback(fn func() *bool) {
+	s.isQuietHoursEnabled = fn
 }
 
 // GetStats returns current statistics
@@ -159,12 +166,24 @@ func (s *Scheduler) run(ctx context.Context) {
 func (s *Scheduler) poll(ctx context.Context) error {
 	s.logger.Info("starting poll cycle")
 
-	// Check if we're in quiet hours
-	if s.cfg.IsQuietTime() {
-		s.logger.Info("quiet hours active, skipping poll cycle",
-			"start", s.cfg.QuietHours.Start,
-			"end", s.cfg.QuietHours.End)
-		return nil
+	// Check if we're in quiet hours (Telegram override takes precedence)
+	quietOverride := s.isQuietHoursEnabled()
+	if quietOverride != nil {
+		// Use Telegram setting
+		if *quietOverride && s.cfg.IsQuietTime() {
+			s.logger.Info("quiet hours active (via Telegram), skipping poll cycle",
+				"start", s.cfg.QuietHours.Start,
+				"end", s.cfg.QuietHours.End)
+			return nil
+		}
+	} else {
+		// Use config setting
+		if s.cfg.IsQuietTime() {
+			s.logger.Info("quiet hours active (via config), skipping poll cycle",
+				"start", s.cfg.QuietHours.Start,
+				"end", s.cfg.QuietHours.End)
+			return nil
+		}
 	}
 
 	// Get active search profiles

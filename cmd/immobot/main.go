@@ -153,6 +153,7 @@ func main() {
 	// Connect bot controller to scheduler
 	sched.SetAutoContactCallback(botController.IsAutoContactEnabled)
 	sched.SetTestModeCallback(botController.IsTestModeEnabled)
+	sched.SetQuietHoursCallback(botController.IsQuietHoursEnabled)
 
 	// Set stats callback for bot controller
 	botController.SetCallbacks(

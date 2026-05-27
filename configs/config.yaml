@@ -17,24 +17,33 @@ is24:
 telegram:
   bot_token: ""  # Set via TELEGRAM_BOT_TOKEN env var
   chat_id: 0     # Set via TELEGRAM_CHAT_ID env var
-  enabled: true
+  enabled: false # Set true or via TELEGRAM_ENABLED env var
 
 whatsapp:
   enabled: false           # Set true or via WHATSAPP_ENABLED env var
   store_path: "data/whatsapp.db"  # whatsmeow session (persisted, gitignored)
-  target_phone: ""         # digits only, e.g. "4915167660667" — receives notifications and is the only number allowed to send commands. Set via WHATSAPP_TARGET_PHONE
+  target_phone: ""         # digits only, e.g. "4915123456789" — receives notifications and is the only number allowed to send commands. Set via WHATSAPP_TARGET_PHONE
   log_level: "INFO"
 
 openai:
   api_key: ""    # Set via OPENAI_API_KEY env var
   model: "gpt-4o-mini"
-  enabled: true
+  enabled: false # Set true or via OPENAI_ENABLED env var
 
 contact:
-  enabled: true
+  enabled: false # Set true or via CONTACT_ENABLED env var
   type_delay: 50ms
   action_delay: 1s
   chrome_path: ""  # Leave empty for auto-detect
+  # Keep private applicant data out of git. Set contact.profile here in a private
+  # config or provide CONTACT_* environment variables when enabling contact.
+  # profile:
+  #   salutation: ""
+  #   first_name: ""
+  #   last_name: ""
+  #   email: ""
+  #   phone: ""
+  #   adults: 1
 
 message:
   template_path: "configs/message_template.txt"

@@ -1,7 +1,11 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -41,7 +45,7 @@ type Campaign struct {
 type WhatsAppConfig struct {
 	Enabled     bool   `yaml:"enabled"`
 	StorePath   string `yaml:"store_path"`   // whatsmeow session DB, e.g. "data/whatsapp.db"
-	TargetPhone string `yaml:"target_phone"` // digits only, e.g. "4915167660667" — receives notifications and is the only authorized commander
+	TargetPhone string `yaml:"target_phone"` // digits only, e.g. "4915123456789" — receives notifications and is the only authorized commander
 	LogLevel    string `yaml:"log_level"`    // whatsmeow log level: "INFO", "DEBUG", ...
 }
 
@@ -135,7 +139,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		Telegram: TelegramConfig{
-			Enabled: true,
+			Enabled: false,
 		},
 		WhatsApp: WhatsAppConfig{
 			Enabled:   false,
@@ -144,33 +148,12 @@ func DefaultConfig() *Config {
 		},
 		OpenAI: OpenAIConfig{
 			Model:   "gpt-4o-mini",
-			Enabled: true,
+			Enabled: false,
 		},
 		Contact: ContactConfig{
-			Enabled:     true,
+			Enabled:     false,
 			TypeDelay:   50 * time.Millisecond,
 			ActionDelay: 1 * time.Second,
-			Profile: ContactProfile{
-				Salutation:    "FEMALE",
-				FirstName:     "Marie",
-				LastName:      "Wiegelmann",
-				Email:         "marie.wiegelmann@outlook.com",
-				Phone:         "+49 151 67660667",
-				Street:        "Erzgießereistraße",
-				HouseNumber:   "32",
-				PostalCode:    "80335",
-				City:          "München",
-				Adults:        2,
-				Children:      0,
-				Pets:          false,
-				Income:        7500,
-				MoveInDate:    "flexibel",
-				Employment:    "Unbefristet",
-				RentArrears:   false,
-				Insolvency:    false,
-				Smoker:        false,
-				CommercialUse: false,
-			},
 		},
 		Message: MessageConfig{
 			TemplatePath: "configs/message_template.txt",
@@ -188,34 +171,65 @@ func DefaultConfig() *Config {
 func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
-	// Read YAML file if exists
-	if data, err := os.ReadFile(path); err == nil {
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, err
+	// Read YAML file. A missing config is treated as an error so typos don't
+	// silently fall back to built-in defaults.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("config file %q does not exist", path)
 		}
+		return nil, fmt.Errorf("read config %q: %w", path, err)
+	}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
 
 	// Override with environment variables
 	if v := os.Getenv("IS24_COOKIE"); v != "" {
 		cfg.IS24.Cookie = v
 	}
+	if err := applyEnvBool("TELEGRAM_ENABLED", &cfg.Telegram.Enabled); err != nil {
+		return nil, err
+	}
 	if v := os.Getenv("TELEGRAM_BOT_TOKEN"); v != "" {
 		cfg.Telegram.BotToken = v
 	}
 	if v := os.Getenv("TELEGRAM_CHAT_ID"); v != "" {
-		var chatID int64
-		if _, err := parseEnvInt64(v, &chatID); err == nil {
-			cfg.Telegram.ChatID = chatID
+		chatID, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TELEGRAM_CHAT_ID: %w", err)
 		}
+		cfg.Telegram.ChatID = chatID
+	}
+	if err := applyEnvBool("OPENAI_ENABLED", &cfg.OpenAI.Enabled); err != nil {
+		return nil, err
 	}
 	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
 		cfg.OpenAI.APIKey = v
 	}
-	if v := os.Getenv("WHATSAPP_ENABLED"); v == "true" || v == "1" {
-		cfg.WhatsApp.Enabled = true
+	if v := os.Getenv("OPENAI_MODEL"); v != "" {
+		cfg.OpenAI.Model = v
+	}
+	if err := applyEnvBool("WHATSAPP_ENABLED", &cfg.WhatsApp.Enabled); err != nil {
+		return nil, err
 	}
 	if v := os.Getenv("WHATSAPP_TARGET_PHONE"); v != "" {
 		cfg.WhatsApp.TargetPhone = v
+	}
+	if v := os.Getenv("WHATSAPP_STORE_PATH"); v != "" {
+		cfg.WhatsApp.StorePath = v
+	}
+	if v := os.Getenv("WHATSAPP_LOG_LEVEL"); v != "" {
+		cfg.WhatsApp.LogLevel = v
+	}
+	if err := applyEnvBool("CONTACT_ENABLED", &cfg.Contact.Enabled); err != nil {
+		return nil, err
+	}
+	if v := os.Getenv("CONTACT_CHROME_PATH"); v != "" {
+		cfg.Contact.ChromePath = v
+	}
+	if err := applyContactProfileEnv(&cfg.Contact.Profile); err != nil {
+		return nil, err
 	}
 	if v := os.Getenv("DATABASE_PATH"); v != "" {
 		cfg.DatabasePath = v
@@ -272,29 +286,158 @@ func (c *Config) fillCampaign(camp Campaign) Campaign {
 	return camp
 }
 
-func parseEnvInt64(s string, target *int64) (bool, error) {
-	var n int64
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			if c == '-' && n == 0 {
-				continue
-			}
-			return false, nil
-		}
-		n = n*10 + int64(c-'0')
+func applyEnvBool(name string, target *bool) error {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return nil
 	}
-	if len(s) > 0 && s[0] == '-' {
-		n = -n
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "y", "on":
+		*target = true
+	case "0", "false", "no", "n", "off":
+		*target = false
+	default:
+		return fmt.Errorf("invalid %s: expected boolean, got %q", name, v)
+	}
+	return nil
+}
+
+func applyContactProfileEnv(p *ContactProfile) error {
+	applyEnvString("CONTACT_SALUTATION", &p.Salutation)
+	applyEnvString("CONTACT_FIRST_NAME", &p.FirstName)
+	applyEnvString("CONTACT_LAST_NAME", &p.LastName)
+	applyEnvString("CONTACT_EMAIL", &p.Email)
+	applyEnvString("CONTACT_PHONE", &p.Phone)
+	applyEnvString("CONTACT_STREET", &p.Street)
+	applyEnvString("CONTACT_HOUSE_NUMBER", &p.HouseNumber)
+	applyEnvString("CONTACT_POSTAL_CODE", &p.PostalCode)
+	applyEnvString("CONTACT_CITY", &p.City)
+	applyEnvString("CONTACT_MOVE_IN_DATE", &p.MoveInDate)
+	applyEnvString("CONTACT_EMPLOYMENT", &p.Employment)
+	if err := applyEnvInt("CONTACT_ADULTS", &p.Adults); err != nil {
+		return err
+	}
+	if err := applyEnvInt("CONTACT_CHILDREN", &p.Children); err != nil {
+		return err
+	}
+	if err := applyEnvInt("CONTACT_INCOME", &p.Income); err != nil {
+		return err
+	}
+	if err := applyEnvBool("CONTACT_PETS", &p.Pets); err != nil {
+		return err
+	}
+	if err := applyEnvBool("CONTACT_RENT_ARREARS", &p.RentArrears); err != nil {
+		return err
+	}
+	if err := applyEnvBool("CONTACT_INSOLVENCY", &p.Insolvency); err != nil {
+		return err
+	}
+	if err := applyEnvBool("CONTACT_SMOKER", &p.Smoker); err != nil {
+		return err
+	}
+	return applyEnvBool("CONTACT_COMMERCIAL_USE", &p.CommercialUse)
+}
+
+func applyEnvString(name string, target *string) {
+	if v := os.Getenv(name); v != "" {
+		*target = v
+	}
+}
+
+func applyEnvInt(name string, target *int) error {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", name, err)
 	}
 	*target = n
-	return true, nil
+	return nil
 }
 
 // Validate checks if required configuration is present
 func (c *Config) Validate() error {
-	// Telegram is optional but warn if enabled without token
-	// IS24 cookie is required for scraping
-	// OpenAI is optional
+	var problems []string
+
+	if c.PollInterval <= 0 {
+		problems = append(problems, "poll_interval must be greater than 0")
+	}
+	if strings.TrimSpace(c.DatabasePath) == "" {
+		problems = append(problems, "database_path is required")
+	}
+	if strings.TrimSpace(c.IS24.Cookie) == "" {
+		problems = append(problems, "is24.cookie or IS24_COOKIE is required")
+	}
+	if c.IS24.MaxRequestsPerMinute <= 0 {
+		problems = append(problems, "is24.max_requests_per_minute must be greater than 0")
+	}
+	if c.IS24.MinDelay < 0 || c.IS24.MaxDelay < 0 {
+		problems = append(problems, "is24 delays must be non-negative")
+	}
+	if c.IS24.MaxDelay < c.IS24.MinDelay {
+		problems = append(problems, "is24.max_delay must be greater than or equal to min_delay")
+	}
+
+	if c.Telegram.Enabled {
+		if strings.TrimSpace(c.Telegram.BotToken) == "" {
+			problems = append(problems, "telegram.bot_token or TELEGRAM_BOT_TOKEN is required when telegram.enabled is true")
+		}
+		if c.Telegram.ChatID == 0 {
+			problems = append(problems, "telegram.chat_id or TELEGRAM_CHAT_ID is required when telegram.enabled is true")
+		}
+	}
+	if c.WhatsApp.Enabled && strings.TrimSpace(c.WhatsApp.TargetPhone) == "" {
+		problems = append(problems, "whatsapp.target_phone or WHATSAPP_TARGET_PHONE is required when whatsapp.enabled is true")
+	}
+	if c.OpenAI.Enabled {
+		if strings.TrimSpace(c.OpenAI.APIKey) == "" {
+			problems = append(problems, "openai.api_key or OPENAI_API_KEY is required when openai.enabled is true")
+		}
+		if strings.TrimSpace(c.OpenAI.Model) == "" {
+			problems = append(problems, "openai.model is required when openai.enabled is true")
+		}
+	}
+	if c.Contact.Enabled {
+		p := c.Contact.Profile
+		required := map[string]string{
+			"contact.profile.first_name or CONTACT_FIRST_NAME": p.FirstName,
+			"contact.profile.last_name or CONTACT_LAST_NAME":   p.LastName,
+			"contact.profile.email or CONTACT_EMAIL":           p.Email,
+		}
+		for label, value := range required {
+			if strings.TrimSpace(value) == "" {
+				problems = append(problems, label+" is required when contact.enabled is true")
+			}
+		}
+		if p.Adults <= 0 {
+			problems = append(problems, "contact.profile.adults or CONTACT_ADULTS must be greater than 0 when contact.enabled is true")
+		}
+		if c.Contact.TypeDelay < 0 || c.Contact.ActionDelay < 0 {
+			problems = append(problems, "contact delays must be non-negative")
+		}
+	}
+	if len(c.Campaigns) > 0 {
+		if strings.TrimSpace(c.DefaultCampaign) == "" {
+			problems = append(problems, "default_campaign is required when campaigns are configured")
+		} else if !c.HasCampaign(c.DefaultCampaign) {
+			problems = append(problems, "default_campaign must reference a configured campaign")
+		}
+	}
+	if c.Message.TemplatePath == "" && len(c.Campaigns) == 0 {
+		problems = append(problems, "message.template_path is required")
+	}
+	if !validClock(c.QuietHours.Start) {
+		problems = append(problems, "quiet_hours.start must use HH:MM")
+	}
+	if !validClock(c.QuietHours.End) {
+		problems = append(problems, "quiet_hours.end must use HH:MM")
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid configuration: %s", strings.Join(problems, "; "))
+	}
 	return nil
 }
 
@@ -303,7 +446,13 @@ func (c *Config) IsQuietTime() bool {
 	if !c.QuietHours.Enabled {
 		return false
 	}
+	return c.IsWithinQuietHours()
+}
 
+// IsWithinQuietHours checks the configured quiet-hours window regardless of the
+// enabled flag. Runtime command overrides use this to turn quiet hours on even
+// when the static config default is off.
+func (c *Config) IsWithinQuietHours() bool {
 	// Load timezone
 	loc, err := time.LoadLocation(c.QuietHours.Timezone)
 	if err != nil {
@@ -363,4 +512,17 @@ func splitTime(s string) []string {
 	}
 	parts = append(parts, current)
 	return parts
+}
+
+func validClock(s string) bool {
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 || len(parts[0]) != 2 || len(parts[1]) != 2 {
+		return false
+	}
+	hour, err := strconv.Atoi(parts[0])
+	if err != nil || hour < 0 || hour > 23 {
+		return false
+	}
+	min, err := strconv.Atoi(parts[1])
+	return err == nil && min >= 0 && min <= 59
 }

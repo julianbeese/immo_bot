@@ -111,6 +111,10 @@ func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message
 
 		// Wait for confirmation
 		chromedp.Sleep(2*time.Second),
+
+		// Verify that the page moved into a success state. Without this a
+		// validation error after the click would be recorded as a real contact.
+		s.ensureSubmitted(),
 	)
 
 	if err != nil {
@@ -139,6 +143,52 @@ func (s *Submitter) setCookies() chromedp.ActionFunc {
 		}
 		return nil
 	}
+}
+
+func (s *Submitter) ensureSubmitted() chromedp.ActionFunc {
+	return func(ctx context.Context) error {
+		var state struct {
+			Success   bool   `json:"success"`
+			ErrorText string `json:"errorText"`
+			FormOpen  bool   `json:"formOpen"`
+		}
+		err := chromedp.Evaluate(`(() => {
+			const visibleText = el => {
+				const style = window.getComputedStyle(el);
+				if (style.display === "none" || style.visibility === "hidden") return "";
+				return (el.innerText || el.textContent || "").trim();
+			};
+			const bodyText = (document.body.innerText || "").toLowerCase();
+			const errorText = Array.from(document.querySelectorAll(
+				'[role="alert"], .error, .input-error, .form-error, [data-qa*="error"]'
+			)).map(visibleText).filter(Boolean).join(" ");
+			return {
+				success: /nachricht.*(gesendet|versendet)|kontaktanfrage.*(gesendet|versendet)|vielen dank/i.test(bodyText),
+				errorText,
+				formOpen: document.querySelector('form[data-qa="contactForm"], .contact-form, #contactForm') !== null
+			};
+		})()`, &state).Do(ctx)
+		if err != nil {
+			return err
+		}
+		if state.ErrorText != "" {
+			return fmt.Errorf("contact form validation failed: %s", truncate(state.ErrorText, 240))
+		}
+		if !state.Success {
+			if state.FormOpen {
+				return fmt.Errorf("contact form submission not confirmed")
+			}
+			return fmt.Errorf("contact submission confirmation not detected")
+		}
+		return nil
+	}
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // Cookie represents a parsed cookie

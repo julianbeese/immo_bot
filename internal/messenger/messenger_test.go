@@ -34,8 +34,14 @@ func TestNewGeneratorFromTextEmptyUsesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "Marie Wiegelmann") {
+	if !strings.Contains(out, "Selbstauskunft") {
 		t.Errorf("empty text should fall back to default template, got %q", out)
+	}
+}
+
+func TestNewGeneratorMissingTemplateReturnsError(t *testing.T) {
+	if _, err := NewGenerator("does-not-exist.txt", "", "", ""); err == nil {
+		t.Error("missing template should return an error")
 	}
 }
 

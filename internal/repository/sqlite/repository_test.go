@@ -130,3 +130,62 @@ func TestSetSearchProfileActive(t *testing.T) {
 		t.Error("expected error for missing id")
 	}
 }
+
+func TestPreviewableListingsDoNotConsumeContactState(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	repo, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	ctx := context.Background()
+
+	sp := &domain.SearchProfile{Name: "X", City: "Berlin", Active: true}
+	if err := repo.CreateSearchProfile(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	listing := &domain.Listing{
+		IS24ID:          "123",
+		Title:           "Wohnung",
+		URL:             "https://is24.de/expose/123",
+		SearchProfileID: sp.ID,
+	}
+	if err := repo.CreateListing(ctx, listing); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkListingNotified(ctx, listing.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	previewable, err := repo.GetPreviewableListings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(previewable) != 1 {
+		t.Fatalf("expected listing to be previewable, got %d", len(previewable))
+	}
+
+	if err := repo.CreateSentMessage(ctx, &domain.SentMessage{
+		ListingID: listing.ID,
+		IS24ID:    listing.IS24ID,
+		Message:   "preview",
+		Status:    domain.MessageStatusPreview,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	previewable, err = repo.GetPreviewableListings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(previewable) != 0 {
+		t.Fatalf("preview should not repeat, got %d listings", len(previewable))
+	}
+	uncontacted, err := repo.GetUncontactedListings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uncontacted) != 1 {
+		t.Fatalf("preview must not mark listing contacted, got %d uncontacted", len(uncontacted))
+	}
+}

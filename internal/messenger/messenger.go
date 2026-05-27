@@ -2,6 +2,7 @@ package messenger
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"text/template"
 
@@ -30,11 +31,14 @@ type TemplateData struct {
 }
 
 // NewGenerator creates a message generator from a template file path, falling
-// back to the built-in default template if the file can't be read.
+// back to the built-in default template only when no path is configured.
 func NewGenerator(templatePath, _, _, _ string) (*Generator, error) {
+	if templatePath == "" {
+		return NewGeneratorFromText(defaultTemplate)
+	}
 	content, err := os.ReadFile(templatePath)
 	if err != nil {
-		content = []byte(defaultTemplate)
+		return nil, fmt.Errorf("read message template %q: %w", templatePath, err)
 	}
 	return NewGeneratorFromText(string(content))
 }
@@ -78,18 +82,13 @@ func (g *Generator) Generate(listing *domain.Listing) (string, error) {
 
 const defaultTemplate = `Sehr geehrte Damen und Herren,
 
-wir sind Marie Wiegelmann und Julian Beese und interessieren uns sehr für Ihre angebotene Wohnung in {{if .District}}{{.District}}{{else}}{{.City}}{{end}}.
+ich interessiere mich sehr für Ihre angebotene Wohnung in {{if .District}}{{.District}}{{else}}{{.City}}{{end}}.
 
 {{.PersonalizedDetails}}
 
-Wir arbeiten beide in der Unternehmensberatung (Nettohaushaltseinkommen ca. 7.400€) und sind auf der Suche nach einer größeren Wohnung in zentraler Lage, in der wir uns langfristig wohlfühlen können.
-
-Unsere Selbstauskunft, Bonitätsbescheinigung etc. finden Sie in unserem Profil.
-
-Über eine Einladung zur Besichtigung würden wir uns sehr freuen. Gerne können Sie mich auch unter 0151 67660667 telefonisch erreichen.
+Meine Selbstauskunft, Bonitätsbescheinigung und weitere Unterlagen stelle ich Ihnen gerne bereit.
 
 Vielen Dank für Ihre Zeit.
 
 Beste Grüße
-Marie Wiegelmann & Julian Beese
 `

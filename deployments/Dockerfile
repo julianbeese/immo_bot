@@ -44,9 +44,10 @@ ENV TZ=Europe/Berlin
 ENV DATABASE_PATH=/app/data/immobot.db
 ENV LOG_LEVEL=info
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD test -f /app/data/immobot.db || exit 1
+# Health check: verify the bot completed a poll recently (heartbeat in DB).
+# Generous start period to cover first WhatsApp QR pairing / initial poll.
+HEALTHCHECK --interval=60s --timeout=15s --start-period=5m --retries=3 \
+    CMD ["/app/immobot", "-healthcheck", "-config", "/app/configs/config.yaml"]
 
 # Run as non-root user
 RUN useradd -r -u 1000 immobot && chown -R immobot:immobot /app

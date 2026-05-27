@@ -26,12 +26,12 @@ func TestNormalizeCommand(t *testing.T) {
 func TestHandleCommandTransitions(t *testing.T) {
 	c := New()
 
-	// Defaults: auto-contact on, quiet hours on.
-	if !c.IsAutoContactEnabled() {
-		t.Fatal("default should be auto-contact on")
+	// Safe defaults: test mode (no live contact), quiet hours on.
+	if c.IsAutoContactEnabled() {
+		t.Fatal("default must NOT be live auto-contact")
 	}
-	if c.IsTestModeEnabled() {
-		t.Fatal("default should not be test mode")
+	if !c.IsTestModeEnabled() {
+		t.Fatal("default should be test mode")
 	}
 	if v := c.IsQuietHoursEnabled(); v == nil || !*v {
 		t.Fatal("default quiet hours should be on")

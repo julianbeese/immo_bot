@@ -18,6 +18,10 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// MetaLastPollOK is the meta key holding the RFC3339 timestamp of the last
+// successful poll cycle; used by the container health check.
+const MetaLastPollOK = "last_poll_ok"
+
 // Repository provides database access for all entities
 type Repository struct {
 	db *sql.DB
@@ -234,6 +238,25 @@ func scanSearchProfile(s rowScanner) (*domain.SearchProfile, error) {
 	sp.PetsAllowed = nullBoolPtr(petsAllowed)
 
 	return &sp, nil
+}
+
+// SetMeta upserts a key/value pair in the meta table.
+func (r *Repository) SetMeta(ctx context.Context, key, value string) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, value)
+	return err
+}
+
+// GetMeta returns the value for a key, or ("", nil) if absent.
+func (r *Repository) GetMeta(ctx context.Context, key string) (string, error) {
+	var value string
+	err := r.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return value, err
 }
 
 // SetSearchProfileActive enables or disables a search profile by ID.

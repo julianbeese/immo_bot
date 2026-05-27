@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/julianbeese/immo_bot/internal/antidetect"
@@ -38,6 +39,7 @@ func main() {
 	// Parse command line flags
 	configPath := flag.String("config", "configs/config.yaml", "Path to configuration file")
 	runOnce := flag.Bool("once", false, "Run a single poll cycle and exit")
+	healthcheck := flag.Bool("healthcheck", false, "Check poll heartbeat freshness and exit (0=healthy)")
 	flag.Parse()
 
 	// Setup logging
@@ -61,6 +63,11 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
+	}
+
+	// Health check mode: report whether the last poll is recent enough, then exit.
+	if *healthcheck {
+		os.Exit(runHealthCheck(cfg))
 	}
 
 	logger.Info("configuration loaded",
@@ -276,10 +283,14 @@ func main() {
 	// Get profile count for startup notification
 	profiles, _ := repo.GetActiveSearchProfiles(ctx)
 	if notif.IsEnabled() {
+		quietLabel := "☀️ Aus (24/7)"
+		if v := ctrl.IsQuietHoursEnabled(); v != nil && *v {
+			quietLabel = "🌙 An (22:00-07:00)"
+		}
 		startupMsg := fmt.Sprintf(`🚀 *ImmoBot gestartet*
 
-*Kontakt:* ✅ Auto-Kontakt aktiv
-*Ruhezeiten:* 🌙 An (22:00-07:00)
+*Kontakt:* %s
+*Ruhezeiten:* %s
 *Suchprofile:* %d
 *Poll-Intervall:* %s
 
@@ -297,7 +308,7 @@ func main() {
 *Info:*
 /status - Aktueller Status
 /stats - Statistiken
-/help - Alle Befehle`, len(profiles), cfg.PollInterval)
+/help - Alle Befehle`, ctrl.ContactModeLabel(), quietLabel, len(profiles), cfg.PollInterval)
 
 		notif.SendRawMessage(ctx, startupMsg)
 	}
@@ -441,4 +452,37 @@ func campaignNames(cfg *config.Config) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// runHealthCheck reports whether the last successful poll is recent enough.
+// Returns 0 (healthy) or 1 (stale/unknown) for use as a container HEALTHCHECK.
+func runHealthCheck(cfg *config.Config) int {
+	repo, err := sqlite.New(cfg.DatabasePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck: open db:", err)
+		return 1
+	}
+	defer repo.Close()
+
+	ts, err := repo.GetMeta(context.Background(), sqlite.MetaLastPollOK)
+	if err != nil || ts == "" {
+		fmt.Fprintln(os.Stderr, "healthcheck: no poll heartbeat yet")
+		return 1
+	}
+	last, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck: bad heartbeat:", ts)
+		return 1
+	}
+
+	// Allow up to 3 poll intervals (floor 10m) before declaring the bot stale.
+	maxAge := 3 * cfg.PollInterval
+	if maxAge < 10*time.Minute {
+		maxAge = 10 * time.Minute
+	}
+	if age := time.Since(last); age > maxAge {
+		fmt.Fprintf(os.Stderr, "healthcheck: last poll %s ago (> %s)\n", age.Round(time.Second), maxAge)
+		return 1
+	}
+	return 0
 }

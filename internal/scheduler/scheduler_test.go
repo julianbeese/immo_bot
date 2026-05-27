@@ -33,33 +33,33 @@ func TestCookieHealthWarnsOnceAndRecovers(t *testing.T) {
 
 	// Below threshold: no warning yet.
 	for i := 0; i < cookieWarnThreshold-1; i++ {
-		s.checkCookieHealth(ctx, 2, 0, 1)
+		s.checkCookieHealth(ctx, 2, 0, 1, false)
 	}
 	if len(fn.raw) != 0 {
 		t.Fatalf("warned too early: %v", fn.raw)
 	}
 
 	// Reaching threshold triggers exactly one warning.
-	s.checkCookieHealth(ctx, 2, 0, 1)
+	s.checkCookieHealth(ctx, 2, 0, 1, false)
 	if len(fn.raw) != 1 {
 		t.Fatalf("expected 1 warning, got %d", len(fn.raw))
 	}
 
 	// Continued emptiness must not spam.
-	s.checkCookieHealth(ctx, 2, 0, 1)
+	s.checkCookieHealth(ctx, 2, 0, 1, false)
 	if len(fn.raw) != 1 {
 		t.Fatalf("warning should not repeat, got %d", len(fn.raw))
 	}
 
 	// Listings coming back resets the state.
-	s.checkCookieHealth(ctx, 2, 5, 0)
+	s.checkCookieHealth(ctx, 2, 5, 0, false)
 	if s.emptyPolls != 0 || s.cookieAlert {
 		t.Fatalf("recovery should reset state: empty=%d alert=%v", s.emptyPolls, s.cookieAlert)
 	}
 
 	// After recovery, a fresh empty streak warns again.
 	for i := 0; i < cookieWarnThreshold; i++ {
-		s.checkCookieHealth(ctx, 2, 0, 1)
+		s.checkCookieHealth(ctx, 2, 0, 1, false)
 	}
 	if len(fn.raw) != 2 {
 		t.Fatalf("expected a 2nd warning after recovery, got %d", len(fn.raw))
@@ -70,9 +70,30 @@ func TestCookieHealthNoProfilesNeverWarns(t *testing.T) {
 	fn := &fakeNotifier{}
 	s := &Scheduler{notifier: fn, logger: slog.Default()}
 	for i := 0; i < 5; i++ {
-		s.checkCookieHealth(context.Background(), 0, 0, 0)
+		s.checkCookieHealth(context.Background(), 0, 0, 0, false)
 	}
 	if len(fn.raw) != 0 {
 		t.Fatalf("no active profiles should never warn, got %v", fn.raw)
+	}
+}
+
+func TestCookieHealthDefersWarningDuringQuietHours(t *testing.T) {
+	fn := &fakeNotifier{}
+	s := &Scheduler{notifier: fn, logger: slog.Default()}
+	ctx := context.Background()
+
+	for i := 0; i < cookieWarnThreshold; i++ {
+		s.checkCookieHealth(ctx, 1, 0, 0, true)
+	}
+	if len(fn.raw) != 0 {
+		t.Fatalf("quiet hours should defer warning, got %v", fn.raw)
+	}
+	if s.cookieAlert {
+		t.Fatal("deferred warning should not mark alert as sent")
+	}
+
+	s.checkCookieHealth(ctx, 1, 0, 0, false)
+	if len(fn.raw) != 1 {
+		t.Fatalf("warning should send after quiet hours, got %d", len(fn.raw))
 	}
 }

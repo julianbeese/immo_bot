@@ -201,24 +201,11 @@ func (s *Scheduler) run(ctx context.Context) {
 func (s *Scheduler) poll(ctx context.Context) error {
 	s.logger.Info("starting poll cycle")
 
-	// Check if we're in quiet hours (Telegram override takes precedence)
-	quietOverride := s.isQuietHoursEnabled()
-	if quietOverride != nil {
-		// Use Telegram setting
-		if *quietOverride && s.cfg.IsQuietTime() {
-			s.logger.Info("quiet hours active (via Telegram), skipping poll cycle",
-				"start", s.cfg.QuietHours.Start,
-				"end", s.cfg.QuietHours.End)
-			return nil
-		}
-	} else {
-		// Use config setting
-		if s.cfg.IsQuietTime() {
-			s.logger.Info("quiet hours active (via config), skipping poll cycle",
-				"start", s.cfg.QuietHours.Start,
-				"end", s.cfg.QuietHours.End)
-			return nil
-		}
+	quietNow := s.quietHoursActive()
+	if quietNow {
+		s.logger.Info("quiet hours active, deferring outbound messages",
+			"start", s.cfg.QuietHours.Start,
+			"end", s.cfg.QuietHours.End)
 	}
 
 	// Get active search profiles
@@ -239,26 +226,28 @@ func (s *Scheduler) poll(ctx context.Context) error {
 		}
 		totalRaw += raw
 	}
-	s.checkCookieHealth(ctx, len(profiles), totalRaw, failures)
+	s.checkCookieHealth(ctx, len(profiles), totalRaw, failures, quietNow)
 
-	// Process notifications for unnotified listings
-	if err := s.sendNotifications(ctx); err != nil {
-		s.logger.Error("notification sending failed", "error", err)
-	}
-
-	// Process auto-contact for uncontacted listings (only if enabled via Telegram)
-	if s.cfg.Contact.Enabled && s.isAutoContactEnabled() {
-		s.logger.Info("auto-contact enabled, processing uncontacted listings")
-		if err := s.sendContacts(ctx); err != nil {
-			s.logger.Error("contact sending failed", "error", err)
+	if !quietNow {
+		// Process notifications for unnotified listings
+		if err := s.sendNotifications(ctx); err != nil {
+			s.logger.Error("notification sending failed", "error", err)
 		}
-	}
 
-	// Process test mode: show message previews without sending
-	if s.cfg.Contact.Enabled && s.isTestModeEnabled() {
-		s.logger.Info("test mode enabled, showing message previews")
-		if err := s.sendTestPreviews(ctx); err != nil {
-			s.logger.Error("test preview failed", "error", err)
+		// Process auto-contact for uncontacted listings (only if enabled via Telegram)
+		if s.cfg.Contact.Enabled && s.isAutoContactEnabled() {
+			s.logger.Info("auto-contact enabled, processing uncontacted listings")
+			if err := s.sendContacts(ctx); err != nil {
+				s.logger.Error("contact sending failed", "error", err)
+			}
+		}
+
+		// Process test mode: show message previews without sending
+		if s.cfg.Contact.Enabled && s.isTestModeEnabled() {
+			s.logger.Info("test mode enabled, showing message previews")
+			if err := s.sendTestPreviews(ctx); err != nil {
+				s.logger.Error("test preview failed", "error", err)
+			}
 		}
 	}
 
@@ -271,13 +260,21 @@ func (s *Scheduler) poll(ctx context.Context) error {
 	return nil
 }
 
+func (s *Scheduler) quietHoursActive() bool {
+	quietOverride := s.isQuietHoursEnabled()
+	if quietOverride != nil {
+		return *quietOverride && s.cfg.IsWithinQuietHours()
+	}
+	return s.cfg.IsQuietTime()
+}
+
 // processProfile searches, filters and stores listings for one profile.
 // Returns the number of raw listings the search returned (used to detect a
 // likely-expired IS24 cookie when searches keep coming back empty).
 // checkCookieHealth warns once when searches keep returning nothing across all
 // active profiles (or all fail), the typical symptom of an expired IS24 cookie.
 // It resets and clears the warning as soon as listings come back.
-func (s *Scheduler) checkCookieHealth(ctx context.Context, profileCount, totalRaw, failures int) {
+func (s *Scheduler) checkCookieHealth(ctx context.Context, profileCount, totalRaw, failures int, quietNow bool) {
 	if profileCount == 0 {
 		return // nothing to search, not a cookie problem
 	}
@@ -291,6 +288,11 @@ func (s *Scheduler) checkCookieHealth(ctx context.Context, profileCount, totalRa
 
 	s.emptyPolls++
 	if s.emptyPolls >= cookieWarnThreshold && !s.cookieAlert {
+		if quietNow {
+			s.logger.Warn("possible expired IS24 cookie, notification deferred by quiet hours",
+				"empty_polls", s.emptyPolls, "failures", failures)
+			return
+		}
 		s.cookieAlert = true
 		msg := fmt.Sprintf(
 			"⚠️ *Keine Inserate seit %d Durchläufen* (%d/%d Profile mit Fehler).\n\n"+
@@ -499,7 +501,7 @@ func (s *Scheduler) sendContacts(ctx context.Context) error {
 }
 
 func (s *Scheduler) sendTestPreviews(ctx context.Context) error {
-	listings, err := s.repo.GetUncontactedListings(ctx)
+	listings, err := s.repo.GetPreviewableListings(ctx)
 	if err != nil {
 		return err
 	}
@@ -530,13 +532,18 @@ func (s *Scheduler) sendTestPreviews(ctx context.Context) error {
 			continue
 		}
 
-		// Mark as contacted so we don't show preview again
-		if err := s.repo.MarkListingContacted(ctx, listing.ID); err != nil {
-			s.logger.Error("mark contacted failed", "id", listing.ID, "error", err)
+		previewMsg := &domain.SentMessage{
+			ListingID: listing.ID,
+			IS24ID:    listing.IS24ID,
+			Message:   message,
+			Status:    domain.MessageStatusPreview,
+		}
+		if err := s.repo.CreateSentMessage(ctx, previewMsg); err != nil {
+			s.logger.Error("preview record failed", "is24_id", listing.IS24ID, "error", err)
 		}
 
 		s.repo.LogActivity(ctx, &domain.ActivityLog{
-			Action:     domain.ActionContactSent,
+			Action:     domain.ActionNotificationSent,
 			EntityType: "listing",
 			EntityID:   listing.ID,
 			Details:    "test_mode_preview",

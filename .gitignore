@@ -29,7 +29,9 @@ data/
 *.db-wal
 *.db-shm
 .env
+.env.cookie
 deployments/.env
+deployments/.env.cookie
 
 # Logs
 *.log

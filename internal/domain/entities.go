@@ -4,29 +4,29 @@ import "time"
 
 // SearchProfile defines criteria for apartment search
 type SearchProfile struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	City        string    `json:"city"`
-	Districts   []string  `json:"districts,omitempty"`
-	PostalCodes []string  `json:"postal_codes,omitempty"`
-	MinPrice    int       `json:"min_price,omitempty"`
-	MaxPrice    int       `json:"max_price,omitempty"`
-	MinRooms    float64   `json:"min_rooms,omitempty"`
-	MaxRooms    float64   `json:"max_rooms,omitempty"`
-	MinArea     int       `json:"min_area,omitempty"`
-	MaxArea     int       `json:"max_area,omitempty"`
-	HasBalcony  *bool     `json:"has_balcony,omitempty"`
-	HasEBK      *bool     `json:"has_ebk,omitempty"`
-	HasElevator *bool     `json:"has_elevator,omitempty"`
-	PetsAllowed *bool     `json:"pets_allowed,omitempty"`
-	MinBuildYear int      `json:"min_build_year,omitempty"`
-	MaxBuildYear int      `json:"max_build_year,omitempty"`
-	ExcludeKeywords []string `json:"exclude_keywords,omitempty"`
-	SearchURL   string    `json:"search_url,omitempty"`
-	Category    string    `json:"category,omitempty"` // campaign name (see config.Campaigns); empty = default
-	Active      bool      `json:"active"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID              int64     `json:"id"`
+	Name            string    `json:"name"`
+	City            string    `json:"city"`
+	Districts       []string  `json:"districts,omitempty"`
+	PostalCodes     []string  `json:"postal_codes,omitempty"`
+	MinPrice        int       `json:"min_price,omitempty"`
+	MaxPrice        int       `json:"max_price,omitempty"`
+	MinRooms        float64   `json:"min_rooms,omitempty"`
+	MaxRooms        float64   `json:"max_rooms,omitempty"`
+	MinArea         int       `json:"min_area,omitempty"`
+	MaxArea         int       `json:"max_area,omitempty"`
+	HasBalcony      *bool     `json:"has_balcony,omitempty"`
+	HasEBK          *bool     `json:"has_ebk,omitempty"`
+	HasElevator     *bool     `json:"has_elevator,omitempty"`
+	PetsAllowed     *bool     `json:"pets_allowed,omitempty"`
+	MinBuildYear    int       `json:"min_build_year,omitempty"`
+	MaxBuildYear    int       `json:"max_build_year,omitempty"`
+	ExcludeKeywords []string  `json:"exclude_keywords,omitempty"`
+	SearchURL       string    `json:"search_url,omitempty"`
+	Category        string    `json:"category,omitempty"` // campaign name (see config.Campaigns); empty = default
+	Active          bool      `json:"active"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // Listing represents an apartment listing from IS24
@@ -63,14 +63,14 @@ type Listing struct {
 
 // SentMessage tracks contact messages sent to avoid duplicates
 type SentMessage struct {
-	ID          int64     `json:"id"`
-	ListingID   int64     `json:"listing_id"`
-	IS24ID      string    `json:"is24_id"`
-	Message     string    `json:"message"`
-	Status      string    `json:"status"` // pending, sent, failed
-	ErrorMsg    string    `json:"error_msg,omitempty"`
-	SentAt      time.Time `json:"sent_at"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID        int64     `json:"id"`
+	ListingID int64     `json:"listing_id"`
+	IS24ID    string    `json:"is24_id"`
+	Message   string    `json:"message"`
+	Status    string    `json:"status"` // pending, sent, failed, preview
+	ErrorMsg  string    `json:"error_msg,omitempty"`
+	SentAt    time.Time `json:"sent_at"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Session stores IS24 authentication cookies
@@ -87,13 +87,13 @@ type Session struct {
 
 // ActivityLog for debugging and audit
 type ActivityLog struct {
-	ID          int64     `json:"id"`
-	Action      string    `json:"action"`
-	EntityType  string    `json:"entity_type,omitempty"`
-	EntityID    int64     `json:"entity_id,omitempty"`
-	Details     string    `json:"details,omitempty"`
-	ErrorMsg    string    `json:"error_msg,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID         int64     `json:"id"`
+	Action     string    `json:"action"`
+	EntityType string    `json:"entity_type,omitempty"`
+	EntityID   int64     `json:"entity_id,omitempty"`
+	Details    string    `json:"details,omitempty"`
+	ErrorMsg   string    `json:"error_msg,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // MessageStatus constants
@@ -101,15 +101,16 @@ const (
 	MessageStatusPending = "pending"
 	MessageStatusSent    = "sent"
 	MessageStatusFailed  = "failed"
+	MessageStatusPreview = "preview"
 )
 
 // ActivityAction constants
 const (
-	ActionSearch         = "search"
-	ActionListingFound   = "listing_found"
-	ActionListingFiltered = "listing_filtered"
+	ActionSearch           = "search"
+	ActionListingFound     = "listing_found"
+	ActionListingFiltered  = "listing_filtered"
 	ActionNotificationSent = "notification_sent"
-	ActionContactSent    = "contact_sent"
-	ActionContactFailed  = "contact_failed"
-	ActionError          = "error"
+	ActionContactSent      = "contact_sent"
+	ActionContactFailed    = "contact_failed"
+	ActionError            = "error"
 )

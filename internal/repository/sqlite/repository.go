@@ -360,6 +360,20 @@ func (r *Repository) GetUncontactedListings(ctx context.Context) ([]domain.Listi
 	return r.getListingsByCondition(ctx, "contacted = 0 AND notified = 1")
 }
 
+// GetPreviewableListings returns uncontacted listings that have not already
+// received a test-mode preview.
+func (r *Repository) GetPreviewableListings(ctx context.Context) ([]domain.Listing, error) {
+	return r.getListingsByCondition(ctx, `
+		contacted = 0
+		AND notified = 1
+		AND NOT EXISTS (
+			SELECT 1 FROM sent_messages
+			WHERE sent_messages.listing_id = listings.id
+			AND sent_messages.status = 'preview'
+		)
+	`)
+}
+
 func (r *Repository) getListingsByCondition(ctx context.Context, condition string) ([]domain.Listing, error) {
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, is24_id, title, url, address, city, district, postal_code,

@@ -24,7 +24,12 @@ import {
   AlertTriangle,
   Building,
   DollarSign,
-  Maximize
+  Maximize,
+  Wand2,
+  Save,
+  RotateCcw,
+  Sparkles,
+  FileText
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -91,6 +96,14 @@ interface SearchProfile {
   active: boolean
 }
 
+interface CampaignCfg {
+  name: string
+  ai_prompt: string
+  ai_prompt_overridden: boolean
+  template: string
+  template_overridden: boolean
+}
+
 interface Listing {
   id: number
   title: string
@@ -113,6 +126,10 @@ export default function DashboardPage() {
   const [overview, setOverview] = React.useState<Overview | null>(null)
   const [profiles, setProfiles] = React.useState<SearchProfile[]>([])
   const [listings, setListings] = React.useState<Listing[]>([])
+  const [campaigns, setCampaigns] = React.useState<CampaignCfg[]>([])
+  // Editable buffers keyed by campaign name; populated from /api/campaigns.
+  const [drafts, setDrafts] = React.useState<Record<string, { ai_prompt: string; template: string }>>({})
+  const [savingCampaign, setSavingCampaign] = React.useState<string | null>(null)
   
   // UI states
   const [loading, setLoading] = React.useState(true)
@@ -151,7 +168,19 @@ export default function DashboardPage() {
       
       const lData = await api("/api/listings?limit=100")
       setListings(lData || [])
-      
+
+      const cData: CampaignCfg[] = (await api("/api/campaigns")) || []
+      setCampaigns(cData)
+      // Only seed drafts the user hasn't started editing, so background polling
+      // doesn't clobber in-progress edits.
+      setDrafts(prev => {
+        const next = { ...prev }
+        for (const c of cData) {
+          if (!next[c.name]) next[c.name] = { ai_prompt: c.ai_prompt, template: c.template }
+        }
+        return next
+      })
+
       setError(null)
     } catch (e: any) {
       console.error(e)
@@ -188,6 +217,49 @@ export default function DashboardPage() {
       toast.error("Fehler", {
         description: e.message || "Einstellungen konnten nicht gespeichert werden.",
       })
+    }
+  }
+
+  // Save a campaign's AI prompt + message template override.
+  const saveCampaign = async (name: string) => {
+    const d = drafts[name]
+    if (!d) return
+    setSavingCampaign(name)
+    try {
+      const updated: CampaignCfg = await api(`/api/campaigns/${encodeURIComponent(name)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ai_prompt: d.ai_prompt, template: d.template }),
+      })
+      setCampaigns(prev => prev.map(c => (c.name === name ? updated : c)))
+      setDrafts(prev => ({ ...prev, [name]: { ai_prompt: updated.ai_prompt, template: updated.template } }))
+      toast.success("Kampagne gespeichert", {
+        description: `"${name}" wird ab dem nächsten Suchzyklus verwendet.`,
+      })
+    } catch (e: any) {
+      toast.error("Speichern fehlgeschlagen", { description: e.message })
+    } finally {
+      setSavingCampaign(null)
+    }
+  }
+
+  // Reset a campaign back to its config.yaml default (clears the override).
+  const resetCampaign = async (name: string) => {
+    if (!confirm(`Kampagne "${name}" auf den Standard aus config.yaml zurücksetzen?`)) return
+    setSavingCampaign(name)
+    try {
+      const updated: CampaignCfg = await api(`/api/campaigns/${encodeURIComponent(name)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ai_prompt: "", template: "" }),
+      })
+      setCampaigns(prev => prev.map(c => (c.name === name ? updated : c)))
+      setDrafts(prev => ({ ...prev, [name]: { ai_prompt: updated.ai_prompt, template: updated.template } }))
+      toast.success("Auf Standard zurückgesetzt")
+    } catch (e: any) {
+      toast.error("Zurücksetzen fehlgeschlagen", { description: e.message })
+    } finally {
+      setSavingCampaign(null)
     }
   }
 
@@ -683,6 +755,104 @@ export default function DashboardPage() {
                 </TableBody>
               </Table>
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Message Templates / AI Prompt Editor */}
+        <Card className="shadow-sm border border-border/60">
+          <CardHeader className="pb-4">
+            <CardTitle className="text-md font-bold tracking-tight flex items-center gap-2">
+              <Wand2 className="h-4 w-4" /> Nachrichten-Vorlagen
+            </CardTitle>
+            <CardDescription className="text-xs">
+              AI-Prompt + Nachrichten-Template pro Kampagne. Die AI füllt nur den Platzhalter{" "}
+              <code className="rounded bg-muted px-1 py-0.5 font-mono text-[10px]">{"{{.PersonalizedDetails}}"}</code>{" "}
+              im Template. Änderungen greifen ab dem nächsten Suchzyklus.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {campaigns.length === 0 && (
+              <p className="text-sm text-muted-foreground">Keine Kampagnen konfiguriert.</p>
+            )}
+            {campaigns.map((c) => {
+              const d = drafts[c.name] || { ai_prompt: c.ai_prompt, template: c.template }
+              const dirty = d.ai_prompt !== c.ai_prompt || d.template !== c.template
+              const overridden = c.ai_prompt_overridden || c.template_overridden
+              const taClass =
+                "w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs font-mono shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
+              return (
+                <div key={c.name} className="rounded-lg border border-border/60 p-4 space-y-4 bg-muted/5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-sm">{c.name}</span>
+                      {c.name === currentOverview.default_campaign && (
+                        <Badge variant="outline" className="text-[10px] bg-muted/20">Standard</Badge>
+                      )}
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] ${overridden ? "bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20" : "bg-muted/20 text-muted-foreground"}`}
+                      >
+                        {overridden ? "angepasst" : "Standard (config.yaml)"}
+                      </Badge>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => resetCampaign(c.name)}
+                        disabled={savingCampaign === c.name || !overridden}
+                        className="h-8 gap-1.5 text-xs text-muted-foreground"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" /> Zurücksetzen
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => saveCampaign(c.name)}
+                        disabled={savingCampaign === c.name || !dirty}
+                        className="h-8 gap-1.5 text-xs font-semibold"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        {savingCampaign === c.name ? "Speichert..." : "Speichern"}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground uppercase">
+                      <Sparkles className="h-3.5 w-3.5" /> AI-Prompt (System)
+                    </label>
+                    <textarea
+                      className={taClass}
+                      rows={5}
+                      value={d.ai_prompt}
+                      onChange={(e) =>
+                        setDrafts(prev => ({ ...prev, [c.name]: { ...d, ai_prompt: e.target.value } }))
+                      }
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground uppercase">
+                      <FileText className="h-3.5 w-3.5" /> Nachrichten-Template
+                    </label>
+                    <textarea
+                      className={taClass}
+                      rows={9}
+                      value={d.template}
+                      onChange={(e) =>
+                        setDrafts(prev => ({ ...prev, [c.name]: { ...d, template: e.target.value } }))
+                      }
+                    />
+                    <p className="text-[10px] text-muted-foreground">
+                      Platzhalter: <code className="font-mono">{"{{.PersonalizedDetails}}"}</code>,{" "}
+                      <code className="font-mono">{"{{.District}}"}</code>, <code className="font-mono">{"{{.City}}"}</code>,{" "}
+                      <code className="font-mono">{"{{.Title}}"}</code>, <code className="font-mono">{"{{.Price}}"}</code>,{" "}
+                      <code className="font-mono">{"{{.Rooms}}"}</code>, <code className="font-mono">{"{{.Area}}"}</code>
+                    </p>
+                  </div>
+                </div>
+              )
+            })}
           </CardContent>
         </Card>
 

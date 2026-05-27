@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/julianbeese/immo_bot/internal/config"
 	"github.com/julianbeese/immo_bot/internal/control"
 	"github.com/julianbeese/immo_bot/internal/domain"
+	"github.com/julianbeese/immo_bot/internal/messenger"
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
 )
 
@@ -60,6 +62,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/listings", s.handleListings)
 	mux.HandleFunc("GET /api/profiles", s.handleProfiles)
+	mux.HandleFunc("GET /api/campaigns", s.handleCampaigns)
+	mux.HandleFunc("POST /api/campaigns/{name}", s.handleSaveCampaign)
 	mux.HandleFunc("POST /api/settings", s.handleSettings)
 	mux.HandleFunc("POST /api/profiles", s.handleAddProfile)
 	mux.HandleFunc("POST /api/profiles/{id}/active", s.handleSetProfileActive)
@@ -82,8 +86,6 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	}
 	return nil
 }
-
-
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	total, contacted, notified := 0, 0, 0
@@ -144,6 +146,84 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, profiles)
+}
+
+// campaignDTO is the editable message config for one campaign, as shown in the
+// dashboard. AIPrompt/Template hold the effective values (override if set,
+// else the config/built-in default); the *Overridden flags say which.
+type campaignDTO struct {
+	Name             string `json:"name"`
+	AIPrompt         string `json:"ai_prompt"`
+	AIPromptOverride bool   `json:"ai_prompt_overridden"`
+	Template         string `json:"template"`
+	TemplateOverride bool   `json:"template_overridden"`
+}
+
+// effectiveCampaign resolves the displayed AI prompt + template for a campaign:
+// dashboard override first, then config.yaml, then the built-in default.
+func (s *Server) effectiveCampaign(ctx context.Context, name string) campaignDTO {
+	dto := campaignDTO{Name: name}
+	cfgCamp := s.cfg.ResolveCampaign(name)
+
+	if v, err := s.repo.GetMeta(ctx, sqlite.CampaignPromptKey(name)); err == nil && v != "" {
+		dto.AIPrompt, dto.AIPromptOverride = v, true
+	} else if cfgCamp.AIPrompt != "" {
+		dto.AIPrompt = cfgCamp.AIPrompt
+	} else {
+		dto.AIPrompt = messenger.DefaultSystemPrompt()
+	}
+
+	if v, err := s.repo.GetMeta(ctx, sqlite.CampaignTemplateKey(name)); err == nil && v != "" {
+		dto.Template, dto.TemplateOverride = v, true
+	} else if cfgCamp.MessageTemplatePath != "" {
+		if b, err := os.ReadFile(cfgCamp.MessageTemplatePath); err == nil {
+			dto.Template = string(b)
+		} else {
+			dto.Template = messenger.DefaultTemplate()
+		}
+	} else {
+		dto.Template = messenger.DefaultTemplate()
+	}
+	return dto
+}
+
+func (s *Server) handleCampaigns(w http.ResponseWriter, r *http.Request) {
+	names := s.campaignNames()
+	out := make([]campaignDTO, 0, len(names))
+	for _, n := range names {
+		out = append(out, s.effectiveCampaign(r.Context(), n))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleSaveCampaign(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !s.cfg.HasCampaign(name) {
+		writeErr(w, http.StatusBadRequest, errors.New("unknown campaign: "+name))
+		return
+	}
+	var body struct {
+		AIPrompt *string `json:"ai_prompt"`
+		Template *string `json:"template"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	// An empty value clears the override (scheduler then falls back to config).
+	if body.AIPrompt != nil {
+		if err := s.repo.SetMeta(r.Context(), sqlite.CampaignPromptKey(name), strings.TrimSpace(*body.AIPrompt)); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if body.Template != nil {
+		if err := s.repo.SetMeta(r.Context(), sqlite.CampaignTemplateKey(name), strings.TrimSpace(*body.Template)); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, s.effectiveCampaign(r.Context(), name))
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {

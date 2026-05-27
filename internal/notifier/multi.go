@@ -38,12 +38,24 @@ func NewMulti(channels ...Notifier) *Multi {
 	return &Multi{channels: enabled}
 }
 
+// fanOut delivers to every channel and treats the call as successful if at
+// least one channel accepted it — this is what makes additional channels act
+// as fallbacks (e.g. Telegram still "succeeds" while WhatsApp is down, so the
+// scheduler marks the listing handled instead of resending it every cycle).
+// An error is returned only when every channel failed (or none are configured
+// but at least one was attempted).
 func (m *Multi) fanOut(fn func(Notifier) error) error {
 	var errs []error
+	delivered := false
 	for _, c := range m.channels {
 		if err := fn(c); err != nil {
 			errs = append(errs, err)
+		} else {
+			delivered = true
 		}
+	}
+	if delivered {
+		return nil
 	}
 	return errors.Join(errs...)
 }

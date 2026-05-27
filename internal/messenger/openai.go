@@ -199,6 +199,10 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// DefaultSystemPrompt returns the built-in AI system prompt. The dashboard
+// shows it as a baseline when a campaign has no ai_prompt override.
+func DefaultSystemPrompt() string { return systemPrompt }
+
 const systemPrompt = `Du bist ein Assistent, der personalisierte Sätze für Wohnungsbewerbungen schreibt.
 Deine Aufgabe ist es, 1-2 authentische, enthusiastische Sätze zu schreiben, die zeigen, warum diese spezifische Wohnung interessant ist.
 Nenne konkrete Details aus dem Inserat (Lage, Ausstattung, Räume, Bilder, etc.).

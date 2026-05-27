@@ -56,6 +56,10 @@ func NewGeneratorFromText(text string) (*Generator, error) {
 	return &Generator{template: tmpl}, nil
 }
 
+// DefaultTemplate returns the built-in fallback message template text. The
+// dashboard shows it as a baseline when a campaign has no template override.
+func DefaultTemplate() string { return defaultTemplate }
+
 // Generate creates a message for a listing (without personalization)
 func (g *Generator) Generate(listing *domain.Listing) (string, error) {
 	data := TemplateData{

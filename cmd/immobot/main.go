@@ -411,6 +411,7 @@ func newCampaignResolver(cfg *config.Config, logger *slog.Logger) (*campaignReso
 			return nil, fmt.Errorf("campaign %q template: %w", name, err)
 		}
 		r.byName[name] = scheduler.Campaign{
+			Name:      name,
 			Generator: gen,
 			AIPrompt:  camp.AIPrompt,
 			Contact:   toContactProfile(camp.Contact),
@@ -425,6 +426,7 @@ func newCampaignResolver(cfg *config.Config, logger *slog.Logger) (*campaignReso
 		return nil, fmt.Errorf("fallback campaign template: %w", err)
 	}
 	r.fallback = scheduler.Campaign{
+		Name:      cfg.DefaultCampaign,
 		Generator: gen,
 		AIPrompt:  fb.AIPrompt,
 		Contact:   toContactProfile(fb.Contact),

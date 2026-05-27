@@ -100,7 +100,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.wa.Store.ID == nil {
 		// Not linked yet: use phone-number pairing (more reliable than scanning a
 		// terminal QR). whatsmeow returns an 8-char code to enter in WhatsApp.
-		code, err := c.wa.PairPhone(ctx, c.target.User, true, whatsmeow.PairClientChrome, "ImmoBot")
+		// The display name must be a real "Browser (OS)" string — WhatsApp
+		// validates it server-side and returns 400 bad-request otherwise
+		// (e.g. "ImmoBot" is rejected).
+		code, err := c.wa.PairPhone(ctx, c.target.User, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
 		if err != nil {
 			return fmt.Errorf("pair phone: %w", err)
 		}

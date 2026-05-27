@@ -73,20 +73,35 @@ func TestMultiFanOutAllMethods(t *testing.T) {
 	}
 }
 
-func TestMultiJoinsErrors(t *testing.T) {
+func TestMultiJoinsErrorsWhenAllFail(t *testing.T) {
 	errA := errors.New("a failed")
 	errB := errors.New("b failed")
 	a := &fakeNotifier{enabled: true, err: errA}
 	b := &fakeNotifier{enabled: true, err: errB}
-	ok := &fakeNotifier{enabled: true}
-	m := NewMulti(a, ok, b)
+	m := NewMulti(a, b)
 
 	err := m.NotifyError(context.Background(), "boom")
 	if !errors.Is(err, errA) || !errors.Is(err, errB) {
-		t.Errorf("joined error should contain both, got %v", err)
+		t.Errorf("when every channel fails, joined error should contain both, got %v", err)
 	}
-	if ok.calls != 1 {
+	if b.calls != 1 {
 		t.Error("a failing channel must not stop others")
+	}
+}
+
+// Fallback semantics: if at least one channel delivers, the fan-out succeeds
+// even though another failed (the failing one is still attempted). This is what
+// lets Telegram cover for a downed WhatsApp without re-sending every cycle.
+func TestMultiSucceedsIfAnyChannelSucceeds(t *testing.T) {
+	failing := &fakeNotifier{enabled: true, err: errors.New("down")}
+	ok := &fakeNotifier{enabled: true}
+	m := NewMulti(failing, ok)
+
+	if err := m.NotifyNewListing(context.Background(), &domain.Listing{}); err != nil {
+		t.Errorf("delivery succeeding on one channel should return nil, got %v", err)
+	}
+	if failing.calls != 1 {
+		t.Error("the failing channel must still be attempted")
 	}
 }
 

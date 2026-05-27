@@ -22,6 +22,13 @@ var migrationsFS embed.FS
 // successful poll cycle; used by the container health check.
 const MetaLastPollOK = "last_poll_ok"
 
+// CampaignPromptKey / CampaignTemplateKey are the meta-table keys under which
+// dashboard-edited per-campaign overrides (AI system prompt, message template)
+// are persisted. Shared by the scheduler (reads at send time) and the web
+// dashboard (writes on save).
+func CampaignPromptKey(name string) string   { return "campaign." + name + ".ai_prompt" }
+func CampaignTemplateKey(name string) string { return "campaign." + name + ".template" }
+
 // Repository provides database access for all entities
 type Repository struct {
 	db *sql.DB

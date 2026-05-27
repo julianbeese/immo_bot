@@ -73,10 +73,15 @@ type MessageEnhancer interface {
 
 // Campaign is the resolved personalization bundle for one search strategy.
 type Campaign struct {
+	Name      string // campaign key (e.g. "single"), used to look up dashboard overrides
 	Generator *messenger.Generator
 	AIPrompt  string
 	Contact   contact.Profile
 }
+
+// testModeCycleLimit caps how many listings test mode notifies/previews per
+// poll cycle, so enabling it on a broad search profile can't blast WhatsApp.
+const testModeCycleLimit = 3
 
 // CampaignResolver maps a search profile's category to its Campaign.
 // Implemented in main from config.Campaigns.
@@ -388,11 +393,18 @@ func (s *Scheduler) sendNotifications(ctx context.Context) error {
 		return err
 	}
 
+	testMode := s.isTestModeEnabled()
+	sent := 0
 	for _, listing := range listings {
+		if testMode && sent >= testModeCycleLimit {
+			s.logger.Info("test mode notification cap reached", "limit", testModeCycleLimit)
+			break
+		}
 		if err := s.notifier.NotifyNewListing(ctx, &listing); err != nil {
 			s.logger.Error("notification failed", "is24_id", listing.IS24ID, "error", err)
 			continue
 		}
+		sent++
 
 		if err := s.repo.MarkListingNotified(ctx, listing.ID); err != nil {
 			s.logger.Error("mark notified failed", "id", listing.ID, "error", err)
@@ -421,7 +433,27 @@ func (s *Scheduler) campaignFor(ctx context.Context, listing *domain.Listing) Ca
 				"search_profile_id", listing.SearchProfileID, "error", err)
 		}
 	}
-	return s.campaigns.Resolve(category)
+	return s.applyCampaignOverrides(ctx, s.campaigns.Resolve(category))
+}
+
+// applyCampaignOverrides layers dashboard-edited AI prompt / message template
+// (persisted in the meta table) over the config-derived campaign. Empty or
+// missing overrides leave the config defaults untouched.
+func (s *Scheduler) applyCampaignOverrides(ctx context.Context, camp Campaign) Campaign {
+	if camp.Name == "" {
+		return camp
+	}
+	if prompt, err := s.repo.GetMeta(ctx, sqlite.CampaignPromptKey(camp.Name)); err == nil && prompt != "" {
+		camp.AIPrompt = prompt
+	}
+	if tmpl, err := s.repo.GetMeta(ctx, sqlite.CampaignTemplateKey(camp.Name)); err == nil && tmpl != "" {
+		if gen, err := messenger.NewGeneratorFromText(tmpl); err == nil {
+			camp.Generator = gen
+		} else {
+			s.logger.Warn("invalid campaign template override, using default", "campaign", camp.Name, "error", err)
+		}
+	}
+	return camp
 }
 
 func (s *Scheduler) sendContacts(ctx context.Context) error {
@@ -504,6 +536,9 @@ func (s *Scheduler) sendTestPreviews(ctx context.Context) error {
 	listings, err := s.repo.GetPreviewableListings(ctx)
 	if err != nil {
 		return err
+	}
+	if len(listings) > testModeCycleLimit {
+		listings = listings[:testModeCycleLimit]
 	}
 
 	for _, listing := range listings {

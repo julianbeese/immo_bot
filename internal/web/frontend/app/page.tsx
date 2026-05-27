@@ -323,7 +323,7 @@ export default function DashboardPage() {
       
       {/* Top Header */}
       <header className="sticky top-0 z-40 w-full border-b bg-background/95 backdrop-blur-md">
-        <div className="container mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
+        <div className="container mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 md:px-8">
           <div className="flex items-center gap-2.5">
             <div>
               <h1 className="text-lg font-bold tracking-tight">ImmoBot</h1>
@@ -389,7 +389,7 @@ export default function DashboardPage() {
       </header>
 
       {/* Main Body */}
-      <main className="container mx-auto max-w-6xl p-4 sm:p-6 space-y-6">
+      <main className="container mx-auto max-w-[1440px] p-4 sm:p-6 md:p-8 space-y-6">
         
         {error && (
           <div className="flex items-center gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">

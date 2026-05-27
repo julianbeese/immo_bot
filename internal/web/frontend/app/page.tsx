@@ -325,7 +325,6 @@ export default function DashboardPage() {
       <header className="sticky top-0 z-40 w-full border-b bg-background/95 backdrop-blur-md">
         <div className="container mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
           <div className="flex items-center gap-2.5">
-            <span className="text-2xl" role="img" aria-label="Haus">🏠</span>
             <div>
               <h1 className="text-lg font-bold tracking-tight">ImmoBot</h1>
               <p className="hidden text-[10px] text-muted-foreground sm:block">Real-time Real Estate Assistant</p>
@@ -798,16 +797,7 @@ export default function DashboardPage() {
         </Card>
       </main>
 
-      {/* Footer */}
-      <footer className="w-full border-t bg-muted/20 py-6 mt-12">
-        <div className="container mx-auto max-w-6xl px-4 text-center text-xs text-muted-foreground flex flex-col sm:flex-row items-center justify-between gap-4">
-          <p>© {new Date().getFullYear()} ImmoBot Dashboard. Alle Rechte vorbehalten.</p>
-          <div className="flex items-center gap-2">
-            <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="font-mono">Localhost Server Online</span>
-          </div>
-        </div>
-      </footer>
+
     </div>
   )
 }

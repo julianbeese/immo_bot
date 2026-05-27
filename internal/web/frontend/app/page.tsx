@@ -326,8 +326,7 @@ export default function DashboardPage() {
         <div className="container mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 md:px-8">
           <div className="flex items-center gap-2.5">
             <div>
-              <h1 className="text-lg font-bold tracking-tight">ImmoBot</h1>
-              <p className="hidden text-[10px] text-muted-foreground sm:block">Real-time Real Estate Assistant</p>
+              <h1 className="text-lg font-bold tracking-tight">svensk</h1>
             </div>
           </div>
 

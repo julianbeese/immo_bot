@@ -12,10 +12,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 
-	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -95,28 +93,23 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.ctx = ctx
 	c.wa.AddEventHandler(c.handleEvent)
 
-	if c.wa.Store.ID == nil {
-		// Not logged in yet: print a QR code to scan from WhatsApp > Linked Devices.
-		qrChan, err := c.wa.GetQRChannel(ctx)
-		if err != nil {
-			return fmt.Errorf("get qr channel: %w", err)
-		}
-		if err := c.wa.Connect(); err != nil {
-			return fmt.Errorf("connect: %w", err)
-		}
-		for evt := range qrChan {
-			switch evt.Event {
-			case "code":
-				fmt.Println("\nWhatsApp koppeln: in der App unter Einstellungen > Verknüpfte Geräte den Code scannen:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			case "success":
-				c.logger.Info("WhatsApp linked successfully")
-			default:
-				c.logger.Info("WhatsApp QR event", "event", evt.Event)
-			}
-		}
-	} else if err := c.wa.Connect(); err != nil {
+	if err := c.wa.Connect(); err != nil {
 		return fmt.Errorf("connect: %w", err)
+	}
+
+	if c.wa.Store.ID == nil {
+		// Not linked yet: use phone-number pairing (more reliable than scanning a
+		// terminal QR). whatsmeow returns an 8-char code to enter in WhatsApp.
+		code, err := c.wa.PairPhone(ctx, c.target.User, true, whatsmeow.PairClientChrome, "ImmoBot")
+		if err != nil {
+			return fmt.Errorf("pair phone: %w", err)
+		}
+		fmt.Printf("\n=== WhatsApp koppeln ===\n"+
+			"WhatsApp am Handy (Nummer +%s): Einstellungen → Verknüpfte Geräte →\n"+
+			"\"Gerät verknüpfen\" → \"Stattdessen mit Telefonnummer verknüpfen\" →\n"+
+			"diesen Code eingeben:\n\n    %s\n\n"+
+			"(Code läuft nach kurzer Zeit ab — bei Bedarf Bot neu starten.)\n\n", c.target.User, code)
+		c.logger.Info("WhatsApp pairing code generated", "target", c.target.User)
 	}
 
 	c.logger.Info("WhatsApp connected", "target", c.target.User)

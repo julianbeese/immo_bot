@@ -39,7 +39,7 @@ type Scheduler struct {
 	client    IS24Client
 	filter    *filter.Engine
 	notifier  Notifier
-	messenger *messenger.Generator
+	campaigns CampaignResolver
 	enhancer  MessageEnhancer
 	contacter *contact.Submitter
 	logger    *slog.Logger
@@ -55,9 +55,23 @@ type Scheduler struct {
 	doneCh  chan struct{}
 }
 
-// MessageEnhancer enhances messages (OpenAI integration)
+// MessageEnhancer enhances messages (OpenAI integration). campaignPrompt
+// overrides the enhancer's default system prompt per campaign.
 type MessageEnhancer interface {
-	Enhance(ctx context.Context, message string, listing *domain.Listing) (string, error)
+	Enhance(ctx context.Context, message string, listing *domain.Listing, campaignPrompt string) (string, error)
+}
+
+// Campaign is the resolved personalization bundle for one search strategy.
+type Campaign struct {
+	Generator *messenger.Generator
+	AIPrompt  string
+	Contact   contact.Profile
+}
+
+// CampaignResolver maps a search profile's category to its Campaign.
+// Implemented in main from config.Campaigns.
+type CampaignResolver interface {
+	Resolve(category string) Campaign
 }
 
 // NewScheduler creates a new scheduler
@@ -67,7 +81,7 @@ func NewScheduler(
 	client IS24Client,
 	filterEngine *filter.Engine,
 	notifier Notifier,
-	messenger *messenger.Generator,
+	campaigns CampaignResolver,
 	enhancer MessageEnhancer,
 	contacter *contact.Submitter,
 	logger *slog.Logger,
@@ -78,7 +92,7 @@ func NewScheduler(
 		client:               client,
 		filter:               filterEngine,
 		notifier:             notifier,
-		messenger:            messenger,
+		campaigns:            campaigns,
 		enhancer:             enhancer,
 		contacter:            contacter,
 		logger:               logger,
@@ -340,6 +354,22 @@ func (s *Scheduler) sendNotifications(ctx context.Context) error {
 	return nil
 }
 
+// campaignFor resolves the campaign for a listing via its search profile's
+// category, falling back to the default campaign when the profile or category
+// is missing.
+func (s *Scheduler) campaignFor(ctx context.Context, listing *domain.Listing) Campaign {
+	category := ""
+	if listing.SearchProfileID != 0 {
+		if p, err := s.repo.GetSearchProfileByID(ctx, listing.SearchProfileID); err == nil {
+			category = p.Category
+		} else {
+			s.logger.Warn("profile lookup failed, using default campaign",
+				"search_profile_id", listing.SearchProfileID, "error", err)
+		}
+	}
+	return s.campaigns.Resolve(category)
+}
+
 func (s *Scheduler) sendContacts(ctx context.Context) error {
 	if s.contacter == nil {
 		return nil
@@ -351,8 +381,10 @@ func (s *Scheduler) sendContacts(ctx context.Context) error {
 	}
 
 	for _, listing := range listings {
+		camp := s.campaignFor(ctx, &listing)
+
 		// Generate message
-		message, err := s.messenger.Generate(&listing)
+		message, err := camp.Generator.Generate(&listing)
 		if err != nil {
 			s.logger.Error("message generation failed", "is24_id", listing.IS24ID, "error", err)
 			continue
@@ -360,7 +392,7 @@ func (s *Scheduler) sendContacts(ctx context.Context) error {
 
 		// Enhance with AI if available
 		if s.enhancer != nil {
-			enhanced, err := s.enhancer.Enhance(ctx, message, &listing)
+			enhanced, err := s.enhancer.Enhance(ctx, message, &listing, camp.AIPrompt)
 			if err != nil {
 				s.logger.Warn("message enhancement failed, using base message", "error", err)
 			} else {
@@ -380,7 +412,7 @@ func (s *Scheduler) sendContacts(ctx context.Context) error {
 		}
 
 		// Submit contact form
-		if err := s.contacter.Submit(ctx, &listing, message); err != nil {
+		if err := s.contacter.Submit(ctx, &listing, message, camp.Contact); err != nil {
 			s.logger.Error("contact submission failed", "is24_id", listing.IS24ID, "error", err)
 			s.repo.UpdateSentMessageStatus(ctx, sentMsg.ID, domain.MessageStatusFailed, err.Error())
 			s.notifier.NotifyContactFailed(ctx, &listing, err.Error())
@@ -421,8 +453,10 @@ func (s *Scheduler) sendTestPreviews(ctx context.Context) error {
 	}
 
 	for _, listing := range listings {
+		camp := s.campaignFor(ctx, &listing)
+
 		// Generate message
-		message, err := s.messenger.Generate(&listing)
+		message, err := camp.Generator.Generate(&listing)
 		if err != nil {
 			s.logger.Error("message generation failed", "is24_id", listing.IS24ID, "error", err)
 			continue
@@ -430,7 +464,7 @@ func (s *Scheduler) sendTestPreviews(ctx context.Context) error {
 
 		// Enhance with AI if available
 		if s.enhancer != nil {
-			enhanced, err := s.enhancer.Enhance(ctx, message, &listing)
+			enhanced, err := s.enhancer.Enhance(ctx, message, &listing, camp.AIPrompt)
 			if err != nil {
 				s.logger.Warn("message enhancement failed, using base message", "error", err)
 			} else {

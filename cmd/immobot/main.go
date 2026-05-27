@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -122,18 +123,6 @@ func main() {
 	// Fan notifications out to every enabled channel.
 	notif := notifier.NewMulti(tgNotifier, waClient)
 
-	// Initialize message generator
-	msgGenerator, err := messenger.NewGenerator(
-		cfg.Message.TemplatePath,
-		cfg.Message.SenderName,
-		cfg.Message.SenderEmail,
-		cfg.Message.SenderPhone,
-	)
-	if err != nil {
-		logger.Error("failed to initialize message generator", "error", err)
-		os.Exit(1)
-	}
-
 	// Initialize OpenAI enhancer
 	var enhancer scheduler.MessageEnhancer
 	if cfg.OpenAI.Enabled && cfg.OpenAI.APIKey != "" {
@@ -144,34 +133,21 @@ func main() {
 	// Initialize contact submitter
 	var contacter *contact.Submitter
 	if cfg.Contact.Enabled {
-		profile := contact.Profile{
-			Salutation:    cfg.Contact.Profile.Salutation,
-			FirstName:     cfg.Contact.Profile.FirstName,
-			LastName:      cfg.Contact.Profile.LastName,
-			Email:         cfg.Contact.Profile.Email,
-			Phone:         cfg.Contact.Profile.Phone,
-			Street:        cfg.Contact.Profile.Street,
-			HouseNumber:   cfg.Contact.Profile.HouseNumber,
-			PostalCode:    cfg.Contact.Profile.PostalCode,
-			City:          cfg.Contact.Profile.City,
-			Adults:        cfg.Contact.Profile.Adults,
-			Children:      cfg.Contact.Profile.Children,
-			Pets:          cfg.Contact.Profile.Pets,
-			Income:        cfg.Contact.Profile.Income,
-			MoveInDate:    cfg.Contact.Profile.MoveInDate,
-			Employment:    cfg.Contact.Profile.Employment,
-			RentArrears:   cfg.Contact.Profile.RentArrears,
-			Insolvency:    cfg.Contact.Profile.Insolvency,
-			Smoker:        cfg.Contact.Profile.Smoker,
-			CommercialUse: cfg.Contact.Profile.CommercialUse,
-		}
 		contacter = contact.NewSubmitter(
 			cfg.IS24.Cookie,
-			profile,
+			toContactProfile(cfg.Contact.Profile),
 			cfg.Contact.ChromePath,
 			humanBehavior,
 		)
 		logger.Info("auto-contact ready (controlled via Telegram)")
+	}
+
+	// Build per-campaign personalization (message template + AI prompt + contact
+	// profile) and a resolver the scheduler uses per listing.
+	resolver, err := newCampaignResolver(cfg, logger)
+	if err != nil {
+		logger.Error("failed to build campaigns", "error", err)
+		os.Exit(1)
 	}
 
 	// Create scheduler
@@ -181,7 +157,7 @@ func main() {
 		is24Client,
 		filterEngine,
 		notif,
-		msgGenerator,
+		resolver,
 		enhancer,
 		contacter,
 		logger,
@@ -210,18 +186,25 @@ func main() {
 
 	// Search-profile management commands (/addprofil, /listprofile, /delprofil)
 	ctrl.SetProfileCallbacks(
-		func(url, name string) string {
+		func(category, url, name string) string {
+			if category != "" && !cfg.HasCampaign(category) {
+				return fmt.Sprintf("❌ Unbekannte Kampagne %q.\n\nVerfügbar: %s", category, strings.Join(campaignNames(cfg), ", "))
+			}
 			if name == "" {
 				name = profileNameFromURL(url)
 			}
 			// City is left empty: the search_url already scopes the search, and a
 			// wrongly-guessed city would filter out every result.
-			sp := &domain.SearchProfile{Name: name, SearchURL: url, Active: true}
+			sp := &domain.SearchProfile{Name: name, SearchURL: url, Category: category, Active: true}
 			if err := repo.CreateSearchProfile(context.Background(), sp); err != nil {
 				logger.Error("add profile failed", "error", err)
 				return "❌ Profil anlegen fehlgeschlagen: " + err.Error()
 			}
-			return fmt.Sprintf("✅ *Profil angelegt* (id %d)\n\n*%s*\n🔗 %s", sp.ID, name, url)
+			camp := category
+			if camp == "" {
+				camp = cfg.DefaultCampaign
+			}
+			return fmt.Sprintf("✅ *Profil angelegt* (id %d, Kampagne %s)\n\n*%s*\n🔗 %s", sp.ID, camp, name, url)
 		},
 		func() string {
 			profiles, err := repo.GetActiveSearchProfiles(context.Background())
@@ -234,7 +217,11 @@ func main() {
 			var sb strings.Builder
 			sb.WriteString("📋 *Aktive Suchprofile*\n")
 			for _, p := range profiles {
-				sb.WriteString(fmt.Sprintf("\n*%d* — %s", p.ID, p.Name))
+				camp := p.Category
+				if camp == "" {
+					camp = cfg.DefaultCampaign
+				}
+				sb.WriteString(fmt.Sprintf("\n*%d* — %s _(%s)_", p.ID, p.Name, camp))
 				if p.SearchURL != "" {
 					sb.WriteString("\n   🔗 " + p.SearchURL)
 				} else if p.City != "" {
@@ -365,4 +352,93 @@ func profileNameFromURL(raw string) string {
 		}
 	}
 	return "IS24-Suche"
+}
+
+// campaignResolver maps a search profile's category to its scheduler.Campaign
+// (message generator + AI prompt + applicant profile), built from config.
+type campaignResolver struct {
+	byName      map[string]scheduler.Campaign
+	defaultName string
+	fallback    scheduler.Campaign
+}
+
+// Resolve returns the campaign for the category, falling back to the default
+// campaign and then the global fallback.
+func (r *campaignResolver) Resolve(category string) scheduler.Campaign {
+	if c, ok := r.byName[category]; ok {
+		return c
+	}
+	if c, ok := r.byName[r.defaultName]; ok {
+		return c
+	}
+	return r.fallback
+}
+
+// newCampaignResolver parses each configured campaign's template once at startup.
+func newCampaignResolver(cfg *config.Config, logger *slog.Logger) (*campaignResolver, error) {
+	r := &campaignResolver{
+		byName:      make(map[string]scheduler.Campaign),
+		defaultName: cfg.DefaultCampaign,
+	}
+	for name := range cfg.Campaigns {
+		camp := cfg.ResolveCampaign(name) // fills empty fields from globals
+		gen, err := messenger.NewGenerator(camp.MessageTemplatePath, "", "", "")
+		if err != nil {
+			return nil, fmt.Errorf("campaign %q template: %w", name, err)
+		}
+		r.byName[name] = scheduler.Campaign{
+			Generator: gen,
+			AIPrompt:  camp.AIPrompt,
+			Contact:   toContactProfile(camp.Contact),
+		}
+		logger.Info("campaign loaded", "name", name, "template", camp.MessageTemplatePath)
+	}
+
+	// Global fallback for unknown/empty categories.
+	fb := cfg.ResolveCampaign("")
+	gen, err := messenger.NewGenerator(fb.MessageTemplatePath, "", "", "")
+	if err != nil {
+		return nil, fmt.Errorf("fallback campaign template: %w", err)
+	}
+	r.fallback = scheduler.Campaign{
+		Generator: gen,
+		AIPrompt:  fb.AIPrompt,
+		Contact:   toContactProfile(fb.Contact),
+	}
+	return r, nil
+}
+
+// toContactProfile maps the config applicant profile to the contact package type.
+func toContactProfile(p config.ContactProfile) contact.Profile {
+	return contact.Profile{
+		Salutation:    p.Salutation,
+		FirstName:     p.FirstName,
+		LastName:      p.LastName,
+		Email:         p.Email,
+		Phone:         p.Phone,
+		Street:        p.Street,
+		HouseNumber:   p.HouseNumber,
+		PostalCode:    p.PostalCode,
+		City:          p.City,
+		Adults:        p.Adults,
+		Children:      p.Children,
+		Pets:          p.Pets,
+		Income:        p.Income,
+		MoveInDate:    p.MoveInDate,
+		Employment:    p.Employment,
+		RentArrears:   p.RentArrears,
+		Insolvency:    p.Insolvency,
+		Smoker:        p.Smoker,
+		CommercialUse: p.CommercialUse,
+	}
+}
+
+// campaignNames returns the configured campaign names (for error messages).
+func campaignNames(cfg *config.Config) []string {
+	names := make([]string, 0, len(cfg.Campaigns))
+	for n := range cfg.Campaigns {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }

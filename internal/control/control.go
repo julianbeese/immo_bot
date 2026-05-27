@@ -32,7 +32,7 @@ type Controller struct {
 	onStatsRequest  func() string
 
 	// Callbacks for managing search profiles (need DB access, injected by main).
-	onAddProfile   func(url, name string) string
+	onAddProfile   func(category, url, name string) string
 	onListProfiles func() string
 	onDelProfile   func(id string) string
 }
@@ -52,7 +52,7 @@ func (c *Controller) SetCallbacks(onStatus, onStats func() string) {
 }
 
 // SetProfileCallbacks wires the search-profile management commands.
-func (c *Controller) SetProfileCallbacks(onAdd func(url, name string) string, onList func() string, onDel func(id string) string) {
+func (c *Controller) SetProfileCallbacks(onAdd func(category, url, name string) string, onList func() string, onDel func(id string) string) {
 	c.onAddProfile = onAdd
 	c.onListProfiles = onList
 	c.onDelProfile = onDel
@@ -138,18 +138,27 @@ func normalizeCommand(raw string) string {
 	return s
 }
 
-// handleAddProfile validates the URL argument and delegates creation to the
-// injected callback. Usage: addprofil <url> [name...].
+// handleAddProfile parses "[campaign] <url> [name...]" and delegates creation
+// to the injected callback. The optional leading token (not a URL) is the
+// campaign/category; the callback validates it.
 func (c *Controller) handleAddProfile(args []string) string {
-	if len(args) == 0 || !looksLikeURL(args[0]) {
-		return "Nutzung: /addprofil <IS24-Such-URL> [Name]\n\nErst auf immobilienscout24.de die Suche bauen, dann die URL hierher kopieren."
+	const usage = "Nutzung: /addprofil [kampagne] <IS24-Such-URL> [Name]\n\nErst auf immobilienscout24.de die Suche bauen, dann die URL hierher kopieren."
+
+	category := ""
+	rest := args
+	if len(rest) > 0 && !looksLikeURL(rest[0]) {
+		category = strings.ToLower(rest[0])
+		rest = rest[1:]
+	}
+	if len(rest) == 0 || !looksLikeURL(rest[0]) {
+		return usage
 	}
 	if c.onAddProfile == nil {
 		return "Profil-Verwaltung nicht verfügbar."
 	}
-	url := args[0]
-	name := strings.TrimSpace(strings.Join(args[1:], " "))
-	return c.onAddProfile(url, name)
+	url := rest[0]
+	name := strings.TrimSpace(strings.Join(rest[1:], " "))
+	return c.onAddProfile(category, url, name)
 }
 
 func looksLikeURL(s string) bool {
@@ -169,7 +178,7 @@ func (c *Controller) helpMessage() string {
 /quiet_off - Ruhezeiten aus (24/7)
 
 *Suchprofile:*
-/addprofil <URL> [Name] - Profil aus IS24-Such-URL anlegen
+/addprofil [kampagne] <URL> [Name] - Profil aus IS24-Such-URL anlegen
 /listprofile - Aktive Profile anzeigen
 /delprofil <id> - Profil deaktivieren
 

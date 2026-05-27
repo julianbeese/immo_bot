@@ -53,8 +53,12 @@ func NewSubmitter(cookie string, profile Profile, chromePath string, behavior *a
 	}
 }
 
-// Submit fills and submits the IS24 contact form for a listing
-func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message string) error {
+// Submit fills and submits the IS24 contact form for a listing using the given
+// applicant profile (per-campaign; falls back to the submitter's default when zero).
+func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message string, profile Profile) error {
+	if profile == (Profile{}) {
+		profile = s.profile
+	}
 	// Create browser context with options
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
@@ -100,7 +104,7 @@ func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message
 		chromedp.WaitVisible(`form[data-qa="contactForm"], .contact-form, #contactForm`, chromedp.ByQuery),
 
 		// Fill in the form with human-like delays
-		s.fillFormWithDelay(message),
+		s.fillFormWithDelay(message, profile),
 
 		// Submit the form
 		s.submitForm(),
@@ -162,9 +166,9 @@ func parseCookieString(cookieStr string) []Cookie {
 	return cookies
 }
 
-func (s *Submitter) fillFormWithDelay(message string) chromedp.ActionFunc {
+func (s *Submitter) fillFormWithDelay(message string, profile Profile) chromedp.ActionFunc {
 	return func(ctx context.Context) error {
-		p := s.profile
+		p := profile
 
 		// Try to select "Mit Profil bewerben" (Apply with profile) if available
 		s.tryClick(ctx, []string{

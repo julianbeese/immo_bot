@@ -23,6 +23,7 @@ type SearchProfile struct {
 	MaxBuildYear int      `json:"max_build_year,omitempty"`
 	ExcludeKeywords []string `json:"exclude_keywords,omitempty"`
 	SearchURL   string    `json:"search_url,omitempty"`
+	Category    string    `json:"category,omitempty"` // campaign name (see config.Campaigns); empty = default
 	Active      bool      `json:"active"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/julianbeese/immo_bot/internal/domain"
@@ -58,13 +60,51 @@ func (r *Repository) DB() *sql.DB {
 }
 
 func (r *Repository) migrate() error {
-	// Read and execute migration file
-	migration, err := migrationsFS.ReadFile("migrations/001_initial.sql")
+	// Track applied migrations so additive schema changes (002+) run exactly once.
+	if _, err := r.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		filename TEXT PRIMARY KEY,
+		applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
 		return err
 	}
-	_, err = r.db.Exec(string(migration))
-	return err
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files) // run in filename order: 001_, 002_, ...
+
+	for _, name := range files {
+		var applied int
+		if err := r.db.QueryRow(
+			`SELECT COUNT(*) FROM schema_migrations WHERE filename = ?`, name,
+		).Scan(&applied); err != nil {
+			return err
+		}
+		if applied > 0 {
+			continue
+		}
+
+		sqlBytes, err := migrationsFS.ReadFile("migrations/" + name)
+		if err != nil {
+			return err
+		}
+		if _, err := r.db.Exec(string(sqlBytes)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
+		if _, err := r.db.Exec(
+			`INSERT INTO schema_migrations (filename) VALUES (?)`, name,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SearchProfile methods
@@ -80,8 +120,8 @@ func (r *Repository) CreateSearchProfile(ctx context.Context, sp *domain.SearchP
 			name, city, districts, postal_codes, min_price, max_price,
 			min_rooms, max_rooms, min_area, max_area, has_balcony, has_ebk,
 			has_elevator, pets_allowed, min_build_year, max_build_year,
-			exclude_keywords, search_url, active
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			exclude_keywords, search_url, category, active
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		sp.Name, sp.City, string(districts), string(postalCodes),
 		nullableInt(sp.MinPrice), nullableInt(sp.MaxPrice),
@@ -90,7 +130,7 @@ func (r *Repository) CreateSearchProfile(ctx context.Context, sp *domain.SearchP
 		nullableBool(sp.HasBalcony), nullableBool(sp.HasEBK),
 		nullableBool(sp.HasElevator), nullableBool(sp.PetsAllowed),
 		nullableInt(sp.MinBuildYear), nullableInt(sp.MaxBuildYear),
-		string(excludeKeywords), sp.SearchURL, sp.Active,
+		string(excludeKeywords), sp.SearchURL, nullableString(sp.Category), sp.Active,
 	)
 	if err != nil {
 		return err
@@ -112,7 +152,7 @@ func (r *Repository) GetActiveSearchProfiles(ctx context.Context) ([]domain.Sear
 		SELECT id, name, city, districts, postal_codes, min_price, max_price,
 			min_rooms, max_rooms, min_area, max_area, has_balcony, has_ebk,
 			has_elevator, pets_allowed, min_build_year, max_build_year,
-			exclude_keywords, search_url, active, created_at, updated_at
+			exclude_keywords, search_url, category, active, created_at, updated_at
 		FROM search_profiles WHERE active = 1
 	`)
 	if err != nil {
@@ -122,51 +162,78 @@ func (r *Repository) GetActiveSearchProfiles(ctx context.Context) ([]domain.Sear
 
 	var profiles []domain.SearchProfile
 	for rows.Next() {
-		var sp domain.SearchProfile
-		var districts, postalCodes, excludeKeywords, searchURL sql.NullString
-		var hasBalcony, hasEBK, hasElevator, petsAllowed sql.NullBool
-		var minPrice, maxPrice, minArea, maxArea, minBuildYear, maxBuildYear sql.NullInt64
-		var minRooms, maxRooms sql.NullFloat64
-
-		err := rows.Scan(
-			&sp.ID, &sp.Name, &sp.City, &districts, &postalCodes,
-			&minPrice, &maxPrice, &minRooms, &maxRooms,
-			&minArea, &maxArea, &hasBalcony, &hasEBK,
-			&hasElevator, &petsAllowed, &minBuildYear, &maxBuildYear,
-			&excludeKeywords, &searchURL, &sp.Active, &sp.CreatedAt, &sp.UpdatedAt,
-		)
+		sp, err := scanSearchProfile(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		// Convert nullable values
-		sp.MinPrice = int(minPrice.Int64)
-		sp.MaxPrice = int(maxPrice.Int64)
-		sp.MinRooms = minRooms.Float64
-		sp.MaxRooms = maxRooms.Float64
-		sp.MinArea = int(minArea.Int64)
-		sp.MaxArea = int(maxArea.Int64)
-		sp.MinBuildYear = int(minBuildYear.Int64)
-		sp.MaxBuildYear = int(maxBuildYear.Int64)
-		sp.SearchURL = searchURL.String
-
-		if districts.Valid {
-			json.Unmarshal([]byte(districts.String), &sp.Districts)
-		}
-		if postalCodes.Valid {
-			json.Unmarshal([]byte(postalCodes.String), &sp.PostalCodes)
-		}
-		if excludeKeywords.Valid {
-			json.Unmarshal([]byte(excludeKeywords.String), &sp.ExcludeKeywords)
-		}
-		sp.HasBalcony = nullBoolPtr(hasBalcony)
-		sp.HasEBK = nullBoolPtr(hasEBK)
-		sp.HasElevator = nullBoolPtr(hasElevator)
-		sp.PetsAllowed = nullBoolPtr(petsAllowed)
-
-		profiles = append(profiles, sp)
+		profiles = append(profiles, *sp)
 	}
 	return profiles, rows.Err()
+}
+
+// GetSearchProfileByID returns a single search profile (active or not) by ID.
+func (r *Repository) GetSearchProfileByID(ctx context.Context, id int64) (*domain.SearchProfile, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, name, city, districts, postal_codes, min_price, max_price,
+			min_rooms, max_rooms, min_area, max_area, has_balcony, has_ebk,
+			has_elevator, pets_allowed, min_build_year, max_build_year,
+			exclude_keywords, search_url, category, active, created_at, updated_at
+		FROM search_profiles WHERE id = ?
+	`, id)
+	return scanSearchProfile(row)
+}
+
+// rowScanner is satisfied by both *sql.Row and *sql.Rows.
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// scanSearchProfile scans one search_profiles row (column order must match the
+// SELECTs above) into a domain.SearchProfile.
+func scanSearchProfile(s rowScanner) (*domain.SearchProfile, error) {
+	var sp domain.SearchProfile
+	var districts, postalCodes, excludeKeywords, searchURL, category sql.NullString
+	var hasBalcony, hasEBK, hasElevator, petsAllowed sql.NullBool
+	var minPrice, maxPrice, minArea, maxArea, minBuildYear, maxBuildYear sql.NullInt64
+	var minRooms, maxRooms sql.NullFloat64
+
+	err := s.Scan(
+		&sp.ID, &sp.Name, &sp.City, &districts, &postalCodes,
+		&minPrice, &maxPrice, &minRooms, &maxRooms,
+		&minArea, &maxArea, &hasBalcony, &hasEBK,
+		&hasElevator, &petsAllowed, &minBuildYear, &maxBuildYear,
+		&excludeKeywords, &searchURL, &category, &sp.Active, &sp.CreatedAt, &sp.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	sp.MinPrice = int(minPrice.Int64)
+	sp.MaxPrice = int(maxPrice.Int64)
+	sp.MinRooms = minRooms.Float64
+	sp.MaxRooms = maxRooms.Float64
+	sp.MinArea = int(minArea.Int64)
+	sp.MaxArea = int(maxArea.Int64)
+	sp.MinBuildYear = int(minBuildYear.Int64)
+	sp.MaxBuildYear = int(maxBuildYear.Int64)
+	sp.SearchURL = searchURL.String
+	sp.Category = category.String
+
+	if districts.Valid {
+		json.Unmarshal([]byte(districts.String), &sp.Districts)
+	}
+	if postalCodes.Valid {
+		json.Unmarshal([]byte(postalCodes.String), &sp.PostalCodes)
+	}
+	if excludeKeywords.Valid {
+		json.Unmarshal([]byte(excludeKeywords.String), &sp.ExcludeKeywords)
+	}
+	sp.HasBalcony = nullBoolPtr(hasBalcony)
+	sp.HasEBK = nullBoolPtr(hasEBK)
+	sp.HasElevator = nullBoolPtr(hasElevator)
+	sp.PetsAllowed = nullBoolPtr(petsAllowed)
+
+	return &sp, nil
 }
 
 // SetSearchProfileActive enables or disables a search profile by ID.
@@ -447,6 +514,13 @@ func nullableInt(v int) interface{} {
 
 func nullableFloat(v float64) interface{} {
 	if v == 0 {
+		return nil
+	}
+	return v
+}
+
+func nullableString(v string) interface{} {
+	if v == "" {
 		return nil
 	}
 	return v

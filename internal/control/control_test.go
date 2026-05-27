@@ -97,19 +97,25 @@ func TestStatsCallback(t *testing.T) {
 
 func TestProfileCommands(t *testing.T) {
 	c := New()
-	var gotURL, gotName, gotDel string
+	var gotCat, gotURL, gotName, gotDel string
 	c.SetProfileCallbacks(
-		func(url, name string) string { gotURL, gotName = url, name; return "ADDED" },
+		func(category, url, name string) string { gotCat, gotURL, gotName = category, url, name; return "ADDED" },
 		func() string { return "LIST" },
 		func(id string) string { gotDel = id; return "DELETED" },
 	)
 
-	// add with explicit name
+	// add with explicit name, no category
 	if got := c.HandleCommand("/addprofil https://is24.de/Suche/x Mein Profil"); got != "ADDED" {
 		t.Errorf("addprofil response = %q", got)
 	}
-	if gotURL != "https://is24.de/Suche/x" || gotName != "Mein Profil" {
-		t.Errorf("add args: url=%q name=%q", gotURL, gotName)
+	if gotCat != "" || gotURL != "https://is24.de/Suche/x" || gotName != "Mein Profil" {
+		t.Errorf("add args: cat=%q url=%q name=%q", gotCat, gotURL, gotName)
+	}
+
+	// add with category (leading non-URL token)
+	c.HandleCommand("/addprofil wg https://is24.de/Suche/y WG-Suche")
+	if gotCat != "wg" || gotURL != "https://is24.de/Suche/y" || gotName != "WG-Suche" {
+		t.Errorf("add with category: cat=%q url=%q name=%q", gotCat, gotURL, gotName)
 	}
 
 	// add without name → callback gets empty name
@@ -133,7 +139,7 @@ func TestProfileCommands(t *testing.T) {
 func TestProfileCommandValidation(t *testing.T) {
 	c := New()
 	c.SetProfileCallbacks(
-		func(url, name string) string { return "ADDED" },
+		func(category, url, name string) string { return "ADDED" },
 		func() string { return "LIST" },
 		func(id string) string { return "DELETED" },
 	)

@@ -5,9 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/joho/godotenv"
@@ -15,6 +18,7 @@ import (
 	"github.com/julianbeese/immo_bot/internal/config"
 	"github.com/julianbeese/immo_bot/internal/contact"
 	"github.com/julianbeese/immo_bot/internal/control"
+	"github.com/julianbeese/immo_bot/internal/domain"
 	"github.com/julianbeese/immo_bot/internal/filter"
 	"github.com/julianbeese/immo_bot/internal/messenger"
 	"github.com/julianbeese/immo_bot/internal/notifier"
@@ -204,6 +208,53 @@ func main() {
 		},
 	)
 
+	// Search-profile management commands (/addprofil, /listprofile, /delprofil)
+	ctrl.SetProfileCallbacks(
+		func(url, name string) string {
+			if name == "" {
+				name = profileNameFromURL(url)
+			}
+			// City is left empty: the search_url already scopes the search, and a
+			// wrongly-guessed city would filter out every result.
+			sp := &domain.SearchProfile{Name: name, SearchURL: url, Active: true}
+			if err := repo.CreateSearchProfile(context.Background(), sp); err != nil {
+				logger.Error("add profile failed", "error", err)
+				return "❌ Profil anlegen fehlgeschlagen: " + err.Error()
+			}
+			return fmt.Sprintf("✅ *Profil angelegt* (id %d)\n\n*%s*\n🔗 %s", sp.ID, name, url)
+		},
+		func() string {
+			profiles, err := repo.GetActiveSearchProfiles(context.Background())
+			if err != nil {
+				return "❌ Profile laden fehlgeschlagen: " + err.Error()
+			}
+			if len(profiles) == 0 {
+				return "Keine aktiven Suchprofile. Mit /addprofil <URL> eins anlegen."
+			}
+			var sb strings.Builder
+			sb.WriteString("📋 *Aktive Suchprofile*\n")
+			for _, p := range profiles {
+				sb.WriteString(fmt.Sprintf("\n*%d* — %s", p.ID, p.Name))
+				if p.SearchURL != "" {
+					sb.WriteString("\n   🔗 " + p.SearchURL)
+				} else if p.City != "" {
+					sb.WriteString("\n   📍 " + p.City)
+				}
+			}
+			return sb.String()
+		},
+		func(idStr string) string {
+			id, err := strconv.ParseInt(idStr, 10, 64)
+			if err != nil {
+				return "Ungültige ID. Nutzung: /delprofil <id>"
+			}
+			if err := repo.SetSearchProfileActive(context.Background(), id, false); err != nil {
+				return "❌ " + err.Error()
+			}
+			return fmt.Sprintf("🗑 Profil %d deaktiviert.", id)
+		},
+	)
+
 	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -293,4 +344,25 @@ func main() {
 		<-ctx.Done()
 		logger.Info("shutdown complete")
 	}
+}
+
+// profileNameFromURL derives a friendly profile name from an IS24 search URL,
+// using the city segment of the path (".../Suche/de/<region>/<city>/...").
+// Falls back to "IS24-Suche" when the path doesn't match.
+func profileNameFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "IS24-Suche"
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i, p := range parts {
+		if strings.EqualFold(p, "de") && i+2 < len(parts) {
+			city := parts[i+2]
+			if city == "" {
+				break
+			}
+			return strings.ToUpper(city[:1]) + city[1:]
+		}
+	}
+	return "IS24-Suche"
 }

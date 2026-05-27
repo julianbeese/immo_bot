@@ -95,6 +95,72 @@ func TestStatsCallback(t *testing.T) {
 	}
 }
 
+func TestProfileCommands(t *testing.T) {
+	c := New()
+	var gotURL, gotName, gotDel string
+	c.SetProfileCallbacks(
+		func(url, name string) string { gotURL, gotName = url, name; return "ADDED" },
+		func() string { return "LIST" },
+		func(id string) string { gotDel = id; return "DELETED" },
+	)
+
+	// add with explicit name
+	if got := c.HandleCommand("/addprofil https://is24.de/Suche/x Mein Profil"); got != "ADDED" {
+		t.Errorf("addprofil response = %q", got)
+	}
+	if gotURL != "https://is24.de/Suche/x" || gotName != "Mein Profil" {
+		t.Errorf("add args: url=%q name=%q", gotURL, gotName)
+	}
+
+	// add without name → callback gets empty name
+	gotName = "x"
+	c.HandleCommand("addprofil https://is24.de/y")
+	if gotName != "" {
+		t.Errorf("expected empty name, got %q", gotName)
+	}
+
+	// list (plaintext alias)
+	if got := c.HandleCommand("listprofile"); got != "LIST" {
+		t.Errorf("list response = %q", got)
+	}
+
+	// delete with id
+	if got := c.HandleCommand("/delprofil 7"); got != "DELETED" || gotDel != "7" {
+		t.Errorf("del response=%q id=%q", got, gotDel)
+	}
+}
+
+func TestProfileCommandValidation(t *testing.T) {
+	c := New()
+	c.SetProfileCallbacks(
+		func(url, name string) string { return "ADDED" },
+		func() string { return "LIST" },
+		func(id string) string { return "DELETED" },
+	)
+	// missing URL
+	if got := c.HandleCommand("/addprofil"); got == "ADDED" {
+		t.Error("addprofil without URL should not call callback")
+	}
+	// non-URL argument
+	if got := c.HandleCommand("/addprofil notaurl"); got == "ADDED" {
+		t.Error("addprofil with non-URL should not call callback")
+	}
+	// delprofil without id
+	if got := c.HandleCommand("/delprofil"); got == "DELETED" {
+		t.Error("delprofil without id should not call callback")
+	}
+}
+
+func TestProfileCommandsWithoutCallbacks(t *testing.T) {
+	c := New() // no SetProfileCallbacks
+	if got := c.HandleCommand("/addprofil https://is24.de/x"); got == "" {
+		t.Error("addprofil without callback should return a message, not empty")
+	}
+	if got := c.HandleCommand("/listprofile"); got == "" {
+		t.Error("listprofile without callback should return a message")
+	}
+}
+
 func TestIsQuietHoursReturnsCopy(t *testing.T) {
 	c := New()
 	v := c.IsQuietHoursEnabled()

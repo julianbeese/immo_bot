@@ -20,6 +20,21 @@ type Config struct {
 	Contact    ContactConfig    `yaml:"contact"`
 	Message    MessageConfig    `yaml:"message"`
 	QuietHours QuietHoursConfig `yaml:"quiet_hours"`
+
+	// DefaultCampaign / Campaigns enable per-search-profile personalization:
+	// a search profile's category selects a campaign (message template, AI
+	// prompt, contact profile). Empty category → DefaultCampaign.
+	DefaultCampaign string              `yaml:"default_campaign"`
+	Campaigns       map[string]Campaign `yaml:"campaigns"`
+}
+
+// Campaign bundles the message template, AI prompt and applicant profile used
+// for one search strategy (e.g. "single" vs "wg"). Empty fields fall back to
+// the global Message/Contact settings.
+type Campaign struct {
+	MessageTemplatePath string         `yaml:"message_template_path"`
+	AIPrompt            string         `yaml:"ai_prompt"`
+	Contact             ContactProfile `yaml:"contact_profile"`
 }
 
 // WhatsAppConfig for WhatsApp control via whatsmeow (linked device).
@@ -206,7 +221,55 @@ func Load(path string) (*Config, error) {
 		cfg.DatabasePath = v
 	}
 
+	// Backward compatibility: with no campaigns configured, synthesize a single
+	// "default" campaign from the global message/contact settings so existing
+	// configs keep working unchanged.
+	if len(cfg.Campaigns) == 0 {
+		cfg.Campaigns = map[string]Campaign{
+			"default": {
+				MessageTemplatePath: cfg.Message.TemplatePath,
+				Contact:             cfg.Contact.Profile,
+			},
+		}
+		if cfg.DefaultCampaign == "" {
+			cfg.DefaultCampaign = "default"
+		}
+	}
+
 	return cfg, nil
+}
+
+// ResolveCampaign returns the campaign for the given category, falling back to
+// DefaultCampaign and then to the global message/contact settings. Empty
+// per-campaign fields are filled from the globals.
+func (c *Config) ResolveCampaign(category string) Campaign {
+	if camp, ok := c.Campaigns[category]; ok {
+		return c.fillCampaign(camp)
+	}
+	if camp, ok := c.Campaigns[c.DefaultCampaign]; ok {
+		return c.fillCampaign(camp)
+	}
+	return Campaign{
+		MessageTemplatePath: c.Message.TemplatePath,
+		Contact:             c.Contact.Profile,
+	}
+}
+
+// HasCampaign reports whether a campaign with the given name is configured.
+func (c *Config) HasCampaign(name string) bool {
+	_, ok := c.Campaigns[name]
+	return ok
+}
+
+func (c *Config) fillCampaign(camp Campaign) Campaign {
+	if camp.MessageTemplatePath == "" {
+		camp.MessageTemplatePath = c.Message.TemplatePath
+	}
+	// A campaign that omits contact_profile (no name given) uses the global one.
+	if camp.Contact.FirstName == "" && camp.Contact.Email == "" {
+		camp.Contact = c.Contact.Profile
+	}
+	return camp
 }
 
 func parseEnvInt64(s string, target *int64) (bool, error) {

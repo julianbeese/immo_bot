@@ -19,7 +19,10 @@ func (f *fakeNotifier) NotifyNewListing(context.Context, *domain.Listing) error 
 	f.calls++
 	return f.err
 }
-func (f *fakeNotifier) NotifyContactSent(context.Context, *domain.Listing) error { f.calls++; return f.err }
+func (f *fakeNotifier) NotifyContactSent(context.Context, *domain.Listing) error {
+	f.calls++
+	return f.err
+}
 func (f *fakeNotifier) NotifyContactFailed(context.Context, *domain.Listing, string) error {
 	f.calls++
 	return f.err

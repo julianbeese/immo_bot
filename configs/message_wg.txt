@@ -1,0 +1,16 @@
+Sehr geehrte Damen und Herren,
+
+ich interessiere mich sehr für Ihre angebotene Wohnung "{{.Title}}".
+
+{{.PersonalizedDetails}}
+
+Ich suche eine größere Wohnung, um mit zwei Mitbewohner:innen eine ruhige, langfristige Wohngemeinschaft zu gründen. Wir sind alle berufstätig und legen großen Wert auf ein gepflegtes, verlässliches Mietverhältnis.
+
+Unsere Selbstauskünfte und Bonitätsnachweise stellen wir selbstverständlich gerne bereit.
+
+Über eine Einladung zur Besichtigung würden wir uns sehr freuen. Gerne können Sie mich auch unter 0151 67660667 telefonisch erreichen.
+
+Vielen Dank für Ihre Zeit.
+
+Beste Grüße
+Julian Beese

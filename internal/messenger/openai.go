@@ -35,15 +35,16 @@ func NewOpenAIEnhancer(apiKey, model string, enabled bool) *OpenAIEnhancer {
 	}
 }
 
-// Enhance personalizes a message based on listing details
-func (e *OpenAIEnhancer) Enhance(ctx context.Context, message string, listing *domain.Listing) (string, error) {
+// Enhance personalizes a message based on listing details. campaignPrompt
+// overrides the default system prompt (empty → built-in default).
+func (e *OpenAIEnhancer) Enhance(ctx context.Context, message string, listing *domain.Listing, campaignPrompt string) (string, error) {
 	if !e.enabled || e.apiKey == "" {
 		// Fallback: use generic details
 		return e.fallbackEnhance(message, listing), nil
 	}
 
 	// Generate personalized details using GPT
-	personalizedDetails, err := e.generatePersonalizedDetails(ctx, listing)
+	personalizedDetails, err := e.generatePersonalizedDetails(ctx, listing, campaignPrompt)
 	if err != nil {
 		// Fallback on error
 		return e.fallbackEnhance(message, listing), nil
@@ -54,15 +55,20 @@ func (e *OpenAIEnhancer) Enhance(ctx context.Context, message string, listing *d
 	return enhanced, nil
 }
 
-func (e *OpenAIEnhancer) generatePersonalizedDetails(ctx context.Context, listing *domain.Listing) (string, error) {
+func (e *OpenAIEnhancer) generatePersonalizedDetails(ctx context.Context, listing *domain.Listing, campaignPrompt string) (string, error) {
 	prompt := e.buildPrompt(listing)
+
+	sysPrompt := systemPrompt
+	if campaignPrompt != "" {
+		sysPrompt = campaignPrompt
+	}
 
 	request := openAIRequest{
 		Model: e.model,
 		Messages: []openAIMessage{
 			{
 				Role:    "system",
-				Content: systemPrompt,
+				Content: sysPrompt,
 			},
 			{
 				Role:    "user",

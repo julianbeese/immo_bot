@@ -41,3 +41,22 @@ message:
   sender_name: ""
   sender_email: ""
   sender_phone: ""
+
+# Campaigns: per search-profile personalization. A search profile's category
+# (set via /addprofil <kampagne> <url>) selects the campaign below; empty
+# category uses default_campaign. Leave campaigns empty to keep the single
+# global message/contact behavior (a "default" campaign is synthesized).
+default_campaign: "single"
+campaigns:
+  single:
+    message_template_path: "configs/message_single.txt"
+    ai_prompt: "Du schreibst für ein berufstätiges Paar, das langfristig eine gemeinsame Wohnung sucht. 1-2 authentische, enthusiastische Sätze über konkrete Details des Inserats. Keine Besichtigung erwähnen, keine Anrede/Grußformel."
+    # contact_profile leer = globales contact.profile. Für abweichende
+    # Bewerberdaten das Profil KOMPLETT ausfüllen (sonst greift das globale).
+  wg:
+    message_template_path: "configs/message_wg.txt"
+    ai_prompt: "Du schreibst für jemanden, der eine größere Wohnung zur Gründung einer 3er-WG sucht. 1-2 authentische Sätze über konkrete Details des Inserats, betone Eignung für eine WG (Raumaufteilung, Größe). Keine Besichtigung erwähnen, keine Anrede/Grußformel."
+    # contact_profile:
+    #   salutation: MALE
+    #   first_name: Julian
+    #   ...  (komplett ausfüllen, um globales Profil zu überschreiben)

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -53,7 +54,16 @@ type Scheduler struct {
 	running bool
 	stopCh  chan struct{}
 	doneCh  chan struct{}
+
+	// Cookie-health tracking: consecutive polls where every search returned
+	// nothing usually means the IS24 cookie expired.
+	emptyPolls  int
+	cookieAlert bool
 }
+
+// cookieWarnThreshold is the number of consecutive empty/failed polls before
+// warning that the IS24 cookie likely expired.
+const cookieWarnThreshold = 3
 
 // MessageEnhancer enhances messages (OpenAI integration). campaignPrompt
 // overrides the enhancer's default system prompt per campaign.
@@ -219,12 +229,17 @@ func (s *Scheduler) poll(ctx context.Context) error {
 
 	s.logger.Info("processing profiles", "count", len(profiles))
 
+	totalRaw, failures := 0, 0
 	for _, profile := range profiles {
-		if err := s.processProfile(ctx, &profile); err != nil {
+		raw, err := s.processProfile(ctx, &profile)
+		if err != nil {
 			s.logger.Error("profile processing failed", "profile", profile.Name, "error", err)
-			// Continue with other profiles
+			failures++
+			continue // try other profiles
 		}
+		totalRaw += raw
 	}
+	s.checkCookieHealth(ctx, len(profiles), totalRaw, failures)
 
 	// Process notifications for unnotified listings
 	if err := s.sendNotifications(ctx); err != nil {
@@ -247,17 +262,54 @@ func (s *Scheduler) poll(ctx context.Context) error {
 		}
 	}
 
+	// Heartbeat for the health check.
+	if err := s.repo.SetMeta(ctx, sqlite.MetaLastPollOK, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		s.logger.Warn("failed to record poll heartbeat", "error", err)
+	}
+
 	s.logger.Info("poll cycle complete")
 	return nil
 }
 
-func (s *Scheduler) processProfile(ctx context.Context, profile *domain.SearchProfile) error {
+// processProfile searches, filters and stores listings for one profile.
+// Returns the number of raw listings the search returned (used to detect a
+// likely-expired IS24 cookie when searches keep coming back empty).
+// checkCookieHealth warns once when searches keep returning nothing across all
+// active profiles (or all fail), the typical symptom of an expired IS24 cookie.
+// It resets and clears the warning as soon as listings come back.
+func (s *Scheduler) checkCookieHealth(ctx context.Context, profileCount, totalRaw, failures int) {
+	if profileCount == 0 {
+		return // nothing to search, not a cookie problem
+	}
+
+	// A poll is "empty" if no search returned any listing (all empty or all failed).
+	if totalRaw > 0 {
+		s.emptyPolls = 0
+		s.cookieAlert = false
+		return
+	}
+
+	s.emptyPolls++
+	if s.emptyPolls >= cookieWarnThreshold && !s.cookieAlert {
+		s.cookieAlert = true
+		msg := fmt.Sprintf(
+			"⚠️ *Keine Inserate seit %d Durchläufen* (%d/%d Profile mit Fehler).\n\n"+
+				"IS24-Cookie evtl. abgelaufen — bitte `IS24_COOKIE` aktualisieren und Bot neu starten.",
+			s.emptyPolls, failures, profileCount)
+		if s.notifier != nil {
+			s.notifier.SendRawMessage(ctx, msg)
+		}
+		s.logger.Warn("possible expired IS24 cookie", "empty_polls", s.emptyPolls, "failures", failures)
+	}
+}
+
+func (s *Scheduler) processProfile(ctx context.Context, profile *domain.SearchProfile) (int, error) {
 	s.logger.Info("searching", "profile", profile.Name, "city", profile.City)
 
 	// Search IS24
 	listings, err := s.client.Search(ctx, profile)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	s.logger.Info("found listings", "count", len(listings), "profile", profile.Name)
@@ -325,7 +377,7 @@ func (s *Scheduler) processProfile(ctx context.Context, profile *domain.SearchPr
 	}
 
 	s.logger.Info("new listings saved", "count", newCount, "profile", profile.Name)
-	return nil
+	return len(listings), nil
 }
 
 func (s *Scheduler) sendNotifications(ctx context.Context) error {

@@ -79,6 +79,33 @@ func TestGetSearchProfileByIDNotFound(t *testing.T) {
 	}
 }
 
+func TestMetaSetGet(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	repo, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	ctx := context.Background()
+
+	if v, err := repo.GetMeta(ctx, "missing"); err != nil || v != "" {
+		t.Errorf("missing key should be empty, got %q err %v", v, err)
+	}
+	if err := repo.SetMeta(ctx, MetaLastPollOK, "2026-05-27T10:00:00Z"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if v, _ := repo.GetMeta(ctx, MetaLastPollOK); v != "2026-05-27T10:00:00Z" {
+		t.Errorf("GetMeta = %q", v)
+	}
+	// Upsert overwrites.
+	if err := repo.SetMeta(ctx, MetaLastPollOK, "2026-05-27T11:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := repo.GetMeta(ctx, MetaLastPollOK); v != "2026-05-27T11:00:00Z" {
+		t.Errorf("upsert failed, got %q", v)
+	}
+}
+
 func TestSetSearchProfileActive(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	repo, err := New(dbPath)

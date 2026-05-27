@@ -37,10 +37,11 @@ type Controller struct {
 	onDelProfile   func(id string) string
 }
 
-// New creates a controller with the default state: auto-contact on, quiet hours on.
+// New creates a controller with safe defaults: test mode (message previews, no
+// real contact) and quiet hours on. Go live with /contact_on.
 func New() *Controller {
 	return &Controller{
-		contactMode: ContactModeOn,
+		contactMode: ContactModeTest,
 		quietHours:  true,
 	}
 }
@@ -194,15 +195,7 @@ func (c *Controller) statusMessage() string {
 	quietHours := c.quietHours
 	c.mu.RUnlock()
 
-	var mode string
-	switch contactMode {
-	case ContactModeOff:
-		mode = "⏸ Beobachtungsmodus"
-	case ContactModeTest:
-		mode = "🧪 Test-Modus (Nachricht-Vorschau)"
-	case ContactModeOn:
-		mode = "✅ Auto-Kontakt aktiv"
-	}
+	mode := contactModeLabel(contactMode)
 
 	quietStatus := "☀️ Aus (24/7)"
 	if quietHours {
@@ -221,6 +214,23 @@ Befehle: /help für alle Optionen`, mode, quietStatus)
 	}
 
 	return status
+}
+
+// ContactModeLabel returns a human label for the current contact mode (markup).
+func (c *Controller) ContactModeLabel() string {
+	return contactModeLabel(c.GetContactMode())
+}
+
+func contactModeLabel(mode ContactMode) string {
+	switch mode {
+	case ContactModeOff:
+		return "⏸ Beobachtungsmodus"
+	case ContactModeTest:
+		return "🧪 Test-Modus (Nachricht-Vorschau)"
+	case ContactModeOn:
+		return "✅ Auto-Kontakt aktiv"
+	}
+	return "unbekannt"
 }
 
 // IsAutoContactEnabled reports whether auto-contact is on (actually sends messages).

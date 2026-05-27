@@ -8,9 +8,10 @@ package web
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -25,8 +26,8 @@ import (
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
 )
 
-//go:embed index.html
-var indexHTML []byte
+//go:embed all:frontend/out
+var frontendFS embed.FS
 
 // StatsFunc returns aggregate listing counts (total, contacted, notified).
 type StatsFunc func(ctx context.Context) (total, contacted, notified int)
@@ -48,7 +49,14 @@ func New(repo *sqlite.Repository, ctrl *control.Controller, cfg *config.Config, 
 // Handler returns the dashboard's HTTP routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", s.handleIndex)
+
+	distFS, err := fs.Sub(frontendFS, "frontend/out")
+	if err != nil {
+		panic(err)
+	}
+	fileServer := http.FileServer(http.FS(distFS))
+
+	mux.Handle("/", fileServer)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/listings", s.handleListings)
 	mux.HandleFunc("GET /api/profiles", s.handleProfiles)
@@ -75,14 +83,7 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	return nil
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(indexHTML)
-}
+
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	total, contacted, notified := 0, 0, 0

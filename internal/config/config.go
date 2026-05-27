@@ -15,10 +15,19 @@ type Config struct {
 
 	IS24       IS24Config       `yaml:"is24"`
 	Telegram   TelegramConfig   `yaml:"telegram"`
+	WhatsApp   WhatsAppConfig   `yaml:"whatsapp"`
 	OpenAI     OpenAIConfig     `yaml:"openai"`
 	Contact    ContactConfig    `yaml:"contact"`
 	Message    MessageConfig    `yaml:"message"`
 	QuietHours QuietHoursConfig `yaml:"quiet_hours"`
+}
+
+// WhatsAppConfig for WhatsApp control via whatsmeow (linked device).
+type WhatsAppConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	StorePath   string `yaml:"store_path"`   // whatsmeow session DB, e.g. "data/whatsapp.db"
+	TargetPhone string `yaml:"target_phone"` // digits only, e.g. "4915167660667" — receives notifications and is the only authorized commander
+	LogLevel    string `yaml:"log_level"`    // whatsmeow log level: "INFO", "DEBUG", ...
 }
 
 // QuietHoursConfig for defining when the bot should not send messages
@@ -54,34 +63,34 @@ type OpenAIConfig struct {
 
 // ContactConfig for auto-contact settings
 type ContactConfig struct {
-	Enabled      bool          `yaml:"enabled"`
-	TypeDelay    time.Duration `yaml:"type_delay"`
-	ActionDelay  time.Duration `yaml:"action_delay"`
-	ChromePath   string        `yaml:"chrome_path"`
-	Profile      ContactProfile `yaml:"profile"`
+	Enabled     bool           `yaml:"enabled"`
+	TypeDelay   time.Duration  `yaml:"type_delay"`
+	ActionDelay time.Duration  `yaml:"action_delay"`
+	ChromePath  string         `yaml:"chrome_path"`
+	Profile     ContactProfile `yaml:"profile"`
 }
 
 // ContactProfile contains applicant information for IS24 forms
 type ContactProfile struct {
-	Salutation       string `yaml:"salutation"`        // FEMALE or MALE
-	FirstName        string `yaml:"first_name"`
-	LastName         string `yaml:"last_name"`
-	Email            string `yaml:"email"`
-	Phone            string `yaml:"phone"`
-	Street           string `yaml:"street"`
-	HouseNumber      string `yaml:"house_number"`
-	PostalCode       string `yaml:"postal_code"`
-	City             string `yaml:"city"`
-	Adults           int    `yaml:"adults"`
-	Children         int    `yaml:"children"`
-	Pets             bool   `yaml:"pets"`
-	Income           int    `yaml:"income"`             // Monthly net household income
-	MoveInDate       string `yaml:"move_in_date"`       // e.g. "flexibel" or date
-	Employment       string `yaml:"employment"`         // e.g. "Unbefristet"
-	RentArrears      bool   `yaml:"rent_arrears"`       // Mietrückstände
-	Insolvency       bool   `yaml:"insolvency"`         // Insolvenzverfahren
-	Smoker           bool   `yaml:"smoker"`
-	CommercialUse    bool   `yaml:"commercial_use"`
+	Salutation    string `yaml:"salutation"` // FEMALE or MALE
+	FirstName     string `yaml:"first_name"`
+	LastName      string `yaml:"last_name"`
+	Email         string `yaml:"email"`
+	Phone         string `yaml:"phone"`
+	Street        string `yaml:"street"`
+	HouseNumber   string `yaml:"house_number"`
+	PostalCode    string `yaml:"postal_code"`
+	City          string `yaml:"city"`
+	Adults        int    `yaml:"adults"`
+	Children      int    `yaml:"children"`
+	Pets          bool   `yaml:"pets"`
+	Income        int    `yaml:"income"`       // Monthly net household income
+	MoveInDate    string `yaml:"move_in_date"` // e.g. "flexibel" or date
+	Employment    string `yaml:"employment"`   // e.g. "Unbefristet"
+	RentArrears   bool   `yaml:"rent_arrears"` // Mietrückstände
+	Insolvency    bool   `yaml:"insolvency"`   // Insolvenzverfahren
+	Smoker        bool   `yaml:"smoker"`
+	CommercialUse bool   `yaml:"commercial_use"`
 }
 
 // MessageConfig for contact message templates
@@ -112,6 +121,11 @@ func DefaultConfig() *Config {
 		},
 		Telegram: TelegramConfig{
 			Enabled: true,
+		},
+		WhatsApp: WhatsAppConfig{
+			Enabled:   false,
+			StorePath: "data/whatsapp.db",
+			LogLevel:  "INFO",
 		},
 		OpenAI: OpenAIConfig{
 			Model:   "gpt-4o-mini",
@@ -181,6 +195,12 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
 		cfg.OpenAI.APIKey = v
+	}
+	if v := os.Getenv("WHATSAPP_ENABLED"); v == "true" || v == "1" {
+		cfg.WhatsApp.Enabled = true
+	}
+	if v := os.Getenv("WHATSAPP_TARGET_PHONE"); v != "" {
+		cfg.WhatsApp.TargetPhone = v
 	}
 	if v := os.Getenv("DATABASE_PATH"); v != "" {
 		cfg.DatabasePath = v

@@ -45,6 +45,7 @@ type Client struct {
 	ctrl    *control.Controller
 	logger  *slog.Logger
 	enabled bool
+	ctx     context.Context // connection context, used by the event handler for replies
 }
 
 // New builds a WhatsApp client. If cfg.Enabled is false it returns a disabled
@@ -91,6 +92,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		return nil
 	}
 
+	c.ctx = ctx
 	c.wa.AddEventHandler(c.handleEvent)
 
 	if c.wa.Store.ID == nil {
@@ -150,7 +152,11 @@ func (c *Client) handleEvent(evt any) {
 		return
 	}
 
-	if err := c.send(context.Background(), msg.Info.Chat, response); err != nil {
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := c.send(ctx, msg.Info.Chat, response); err != nil {
 		c.logger.Error("whatsapp command reply failed", "error", err)
 	}
 }

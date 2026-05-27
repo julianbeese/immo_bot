@@ -86,9 +86,10 @@ func (c *Controller) HandleCommand(raw string) string {
 }
 
 // normalizeCommand turns "/Contact On" or "contact_on" into the canonical
-// "contact_on" form. Only the first whitespace-separated token after the
-// command word is kept (commands take no arguments), so "contact on please"
-// still maps to "contact_on".
+// "contact_on" form: drops a leading slash, lowercases, and joins
+// whitespace-separated tokens with underscores. Commands take no arguments, so
+// extra tokens (e.g. "contact on now") produce an unknown command rather than
+// being silently trimmed.
 func normalizeCommand(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {

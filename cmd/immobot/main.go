@@ -14,9 +14,12 @@ import (
 	"github.com/julianbeese/immo_bot/internal/antidetect"
 	"github.com/julianbeese/immo_bot/internal/config"
 	"github.com/julianbeese/immo_bot/internal/contact"
+	"github.com/julianbeese/immo_bot/internal/control"
 	"github.com/julianbeese/immo_bot/internal/filter"
 	"github.com/julianbeese/immo_bot/internal/messenger"
+	"github.com/julianbeese/immo_bot/internal/notifier"
 	"github.com/julianbeese/immo_bot/internal/notifier/telegram"
+	"github.com/julianbeese/immo_bot/internal/notifier/whatsapp"
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
 	"github.com/julianbeese/immo_bot/internal/scheduler"
 	"github.com/julianbeese/immo_bot/internal/scraper/is24"
@@ -94,15 +97,26 @@ func main() {
 	// Initialize filter engine
 	filterEngine := filter.NewEngine()
 
+	// Shared, transport-neutral control state (contact mode, quiet hours).
+	ctrl := control.New()
+
 	// Initialize Telegram bot controller (for commands)
-	botController, err := telegram.NewBotController(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Telegram.Enabled)
+	botController, err := telegram.NewBotController(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Telegram.Enabled, ctrl)
 	if err != nil {
 		logger.Error("failed to initialize Telegram bot controller", "error", err)
 		os.Exit(1)
 	}
+	tgNotifier := telegram.NewNotifierFromController(botController)
 
-	// Create notifier from controller
-	notifier := telegram.NewNotifierFromController(botController)
+	// Initialize WhatsApp channel (notifications + commands via whatsmeow)
+	waClient, err := whatsapp.New(context.Background(), cfg.WhatsApp, ctrl, logger)
+	if err != nil {
+		logger.Error("failed to initialize WhatsApp client", "error", err)
+		os.Exit(1)
+	}
+
+	// Fan notifications out to every enabled channel.
+	notif := notifier.NewMulti(tgNotifier, waClient)
 
 	// Initialize message generator
 	msgGenerator, err := messenger.NewGenerator(
@@ -162,31 +176,31 @@ func main() {
 		repo,
 		is24Client,
 		filterEngine,
-		notifier,
+		notif,
 		msgGenerator,
 		enhancer,
 		contacter,
 		logger,
 	)
 
-	// Connect bot controller to scheduler
-	sched.SetAutoContactCallback(botController.IsAutoContactEnabled)
-	sched.SetTestModeCallback(botController.IsTestModeEnabled)
-	sched.SetQuietHoursCallback(botController.IsQuietHoursEnabled)
+	// Connect shared controller state to scheduler
+	sched.SetAutoContactCallback(ctrl.IsAutoContactEnabled)
+	sched.SetTestModeCallback(ctrl.IsTestModeEnabled)
+	sched.SetQuietHoursCallback(ctrl.IsQuietHoursEnabled)
 
-	// Set stats callback for bot controller
-	botController.SetCallbacks(
+	// Set status/stats callbacks (text uses *bold* markup, rendered per channel)
+	ctrl.SetCallbacks(
 		func() string {
 			profiles, _ := repo.GetActiveSearchProfiles(context.Background())
-			return fmt.Sprintf("<b>Aktive Suchprofile:</b> %d", len(profiles))
+			return fmt.Sprintf("*Aktive Suchprofile:* %d", len(profiles))
 		},
 		func() string {
 			total, contacted, notified := sched.GetStats(context.Background())
-			return fmt.Sprintf(`📊 <b>Statistiken</b>
+			return fmt.Sprintf(`📊 *Statistiken*
 
-<b>Wohnungen gefunden:</b> %d
-<b>Benachrichtigt:</b> %d
-<b>Kontaktiert:</b> %d`, total, notified, contacted)
+*Wohnungen gefunden:* %d
+*Benachrichtigt:* %d
+*Kontaktiert:* %d`, total, notified, contacted)
 		},
 	)
 
@@ -211,33 +225,43 @@ func main() {
 		logger.Info("Telegram command listener started")
 	}
 
+	// Connect WhatsApp (prints QR on first run) and start its command listener
+	if waClient.IsEnabled() {
+		if err := waClient.Connect(ctx); err != nil {
+			logger.Error("failed to connect WhatsApp", "error", err)
+			os.Exit(1)
+		}
+		defer waClient.Disconnect()
+		logger.Info("WhatsApp command listener started")
+	}
+
 	// Get profile count for startup notification
 	profiles, _ := repo.GetActiveSearchProfiles(ctx)
-	if notifier.IsEnabled() {
-		startupMsg := fmt.Sprintf(`🚀 <b>ImmoBot gestartet</b>
+	if notif.IsEnabled() {
+		startupMsg := fmt.Sprintf(`🚀 *ImmoBot gestartet*
 
-<b>Kontakt:</b> ✅ Auto-Kontakt aktiv
-<b>Ruhezeiten:</b> 🌙 An (22:00-07:00)
-<b>Suchprofile:</b> %d
-<b>Poll-Intervall:</b> %s
+*Kontakt:* ✅ Auto-Kontakt aktiv
+*Ruhezeiten:* 🌙 An (22:00-07:00)
+*Suchprofile:* %d
+*Poll-Intervall:* %s
 
-<b>━━━ Befehle ━━━</b>
+*━━━ Befehle ━━━*
 
-<b>Kontakt:</b>
+*Kontakt:*
 /contact_on - Auto-Kontakt an
 /contact_test - Test-Modus (Vorschau)
 /contact_off - Nur beobachten
 
-<b>Ruhezeiten:</b>
+*Ruhezeiten:*
 /quiet_on - Ruhezeiten an
 /quiet_off - 24/7 aktiv
 
-<b>Info:</b>
+*Info:*
 /status - Aktueller Status
 /stats - Statistiken
 /help - Alle Befehle`, len(profiles), cfg.PollInterval)
 
-		notifier.SendRawMessage(ctx, startupMsg)
+		notif.SendRawMessage(ctx, startupMsg)
 	}
 
 	if len(profiles) == 0 {

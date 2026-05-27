@@ -19,6 +19,12 @@ telegram:
   chat_id: 0     # Set via TELEGRAM_CHAT_ID env var
   enabled: true
 
+whatsapp:
+  enabled: false           # Set true or via WHATSAPP_ENABLED env var
+  store_path: "data/whatsapp.db"  # whatsmeow session (persisted, gitignored)
+  target_phone: ""         # digits only, e.g. "4915167660667" — receives notifications and is the only number allowed to send commands. Set via WHATSAPP_TARGET_PHONE
+  log_level: "INFO"
+
 openai:
   api_key: ""    # Set via OPENAI_API_KEY env var
   model: "gpt-4o-mini"

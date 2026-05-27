@@ -11,7 +11,6 @@ import (
 	"github.com/julianbeese/immo_bot/internal/domain"
 	"github.com/julianbeese/immo_bot/internal/filter"
 	"github.com/julianbeese/immo_bot/internal/messenger"
-	"github.com/julianbeese/immo_bot/internal/notifier/telegram"
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
 )
 
@@ -21,13 +20,25 @@ type IS24Client interface {
 	FetchExpose(ctx context.Context, is24ID string) (*domain.Listing, error)
 }
 
+// Notifier sends notifications about listings and bot events. Implemented by
+// each channel (Telegram, WhatsApp) and fanned out via notifier.Multi.
+type Notifier interface {
+	NotifyNewListing(ctx context.Context, l *domain.Listing) error
+	NotifyContactSent(ctx context.Context, l *domain.Listing) error
+	NotifyContactFailed(ctx context.Context, l *domain.Listing, errMsg string) error
+	NotifyError(ctx context.Context, errMsg string) error
+	NotifyMessagePreview(ctx context.Context, l *domain.Listing, message string) error
+	SendRawMessage(ctx context.Context, text string) error
+	IsEnabled() bool
+}
+
 // Scheduler coordinates the search, filter, notify, contact workflow
 type Scheduler struct {
 	cfg       *config.Config
 	repo      *sqlite.Repository
 	client    IS24Client
 	filter    *filter.Engine
-	notifier  *telegram.Notifier
+	notifier  Notifier
 	messenger *messenger.Generator
 	enhancer  MessageEnhancer
 	contacter *contact.Submitter
@@ -38,10 +49,10 @@ type Scheduler struct {
 	isTestModeEnabled    func() bool
 	isQuietHoursEnabled  func() *bool // nil = use config, non-nil = override
 
-	mu       sync.Mutex
-	running  bool
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	mu      sync.Mutex
+	running bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 // MessageEnhancer enhances messages (OpenAI integration)
@@ -55,22 +66,22 @@ func NewScheduler(
 	repo *sqlite.Repository,
 	client IS24Client,
 	filterEngine *filter.Engine,
-	notifier *telegram.Notifier,
+	notifier Notifier,
 	messenger *messenger.Generator,
 	enhancer MessageEnhancer,
 	contacter *contact.Submitter,
 	logger *slog.Logger,
 ) *Scheduler {
 	return &Scheduler{
-		cfg:       cfg,
-		repo:      repo,
-		client:    client,
-		filter:    filterEngine,
-		notifier:  notifier,
-		messenger: messenger,
-		enhancer:  enhancer,
-		contacter: contacter,
-		logger:    logger,
+		cfg:                  cfg,
+		repo:                 repo,
+		client:               client,
+		filter:               filterEngine,
+		notifier:             notifier,
+		messenger:            messenger,
+		enhancer:             enhancer,
+		contacter:            contacter,
+		logger:               logger,
 		isAutoContactEnabled: func() bool { return false }, // Default: observation mode
 		isTestModeEnabled:    func() bool { return false },
 		isQuietHoursEnabled:  func() *bool { return nil }, // nil = use config

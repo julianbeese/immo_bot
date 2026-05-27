@@ -78,9 +78,9 @@ func (n *Notifier) NotifyContactSent(ctx context.Context, listing *domain.Listin
 
 	text := fmt.Sprintf(
 		"✅ <b>Kontaktanfrage gesendet</b>\n\n"+
-		"<b>%s</b>\n"+
-		"📍 %s\n"+
-		"🔗 %s",
+			"<b>%s</b>\n"+
+			"📍 %s\n"+
+			"🔗 %s",
 		escapeHTML(listing.Title),
 		escapeHTML(listing.Address),
 		listing.URL,
@@ -101,10 +101,10 @@ func (n *Notifier) NotifyContactFailed(ctx context.Context, listing *domain.List
 
 	text := fmt.Sprintf(
 		"❌ <b>Kontaktanfrage fehlgeschlagen</b>\n\n"+
-		"<b>%s</b>\n"+
-		"📍 %s\n"+
-		"🔗 %s\n\n"+
-		"<b>Fehler:</b> %s",
+			"<b>%s</b>\n"+
+			"📍 %s\n"+
+			"🔗 %s\n\n"+
+			"<b>Fehler:</b> %s",
 		escapeHTML(listing.Title),
 		escapeHTML(listing.Address),
 		listing.URL,
@@ -141,7 +141,7 @@ func (n *Notifier) NotifyStartup(ctx context.Context, profileCount int) error {
 
 	text := fmt.Sprintf(
 		"🚀 <b>ImmoBot gestartet</b>\n\n"+
-		"Aktive Suchprofile: %d",
+			"Aktive Suchprofile: %d",
 		profileCount,
 	)
 
@@ -226,13 +226,14 @@ func (n *Notifier) IsEnabled() bool {
 	return n.enabled
 }
 
-// SendRawMessage sends a raw HTML message
+// SendRawMessage sends a message written in the shared *bold* markup,
+// converting it to Telegram HTML.
 func (n *Notifier) SendRawMessage(ctx context.Context, text string) error {
 	if !n.enabled {
 		return nil
 	}
 
-	msg := tgbotapi.NewMessage(n.chatID, text)
+	msg := tgbotapi.NewMessage(n.chatID, markupToHTML(text))
 	msg.ParseMode = tgbotapi.ModeHTML
 
 	_, err := n.bot.Send(msg)

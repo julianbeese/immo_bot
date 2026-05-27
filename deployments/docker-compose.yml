@@ -19,6 +19,12 @@ services:
     # Shared memory for Chrome
     shm_size: 256mb
 
+    # Web dashboard — published to host loopback only.
+    # On the host/VM: http://127.0.0.1:8080 (tunnel from your laptop via
+    # ssh -L 8080:localhost:8080 user@vm). Requires WEB_ENABLED=true.
+    ports:
+      - "127.0.0.1:8080:8080"
+
     # Volumes
     volumes:
       - ../configs:/app/configs:ro
@@ -36,6 +42,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - WHATSAPP_ENABLED=${WHATSAPP_ENABLED:-false}
       - WHATSAPP_TARGET_PHONE=${WHATSAPP_TARGET_PHONE:-}
+      # Web dashboard: bind 0.0.0.0 inside the container so the published
+      # 127.0.0.1:8080 host port can reach it.
+      - WEB_ENABLED=${WEB_ENABLED:-false}
+      - WEB_ADDR=${WEB_ADDR:-0.0.0.0:8080}
       - IS24_COOKIE=${IS24_COOKIE:-}
       - CONTACT_ENABLED=${CONTACT_ENABLED:-false}
       - CONTACT_FIRST_NAME=${CONTACT_FIRST_NAME:-}

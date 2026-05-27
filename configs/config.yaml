@@ -2,6 +2,13 @@ poll_interval: 5m
 database_path: data/immobot.db
 log_level: info
 
+# Local web dashboard (status, listings, settings, profiles).
+# Localhost only by default — view on a VM via SSH tunnel
+# (ssh -L 8080:localhost:8080 user@vm). Toggle via WEB_ENABLED / WEB_ADDR env.
+web:
+  enabled: false
+  addr: "127.0.0.1:8080"
+
 is24:
   cookie: ""  # Set via IS24_COOKIE env var or paste here
   max_requests_per_minute: 10

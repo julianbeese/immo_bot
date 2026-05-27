@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/julianbeese/immo_bot/internal/domain"
@@ -76,6 +77,65 @@ func TestGetSearchProfileByIDNotFound(t *testing.T) {
 	defer repo.Close()
 	if _, err := repo.GetSearchProfileByID(context.Background(), 999); err == nil {
 		t.Error("expected error for missing profile")
+	}
+}
+
+func TestListRecentListingsAndProfiles(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	repo, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	ctx := context.Background()
+
+	sp := &domain.SearchProfile{Name: "P", City: "Berlin", Active: true, Category: "wg"}
+	if err := repo.CreateSearchProfile(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		l := &domain.Listing{
+			IS24ID:          "id" + strconv.Itoa(i),
+			Title:           "W" + strconv.Itoa(i),
+			URL:             "https://is24.de/expose/" + strconv.Itoa(i),
+			SearchProfileID: sp.ID,
+		}
+		if err := repo.CreateListing(ctx, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	recent, err := repo.ListRecentListings(ctx, 2)
+	if err != nil {
+		t.Fatalf("ListRecentListings: %v", err)
+	}
+	if len(recent) != 2 {
+		t.Errorf("limit not applied: got %d, want 2", len(recent))
+	}
+
+	// Deactivate → still listed by ListAll, not by GetActive.
+	if err := repo.SetSearchProfileActive(ctx, sp.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	all, _ := repo.ListAllSearchProfiles(ctx)
+	if len(all) != 1 || all[0].Category != "wg" {
+		t.Errorf("ListAllSearchProfiles = %+v", all)
+	}
+	active, _ := repo.GetActiveSearchProfiles(ctx)
+	if len(active) != 0 {
+		t.Errorf("deactivated profile must not be active, got %d", len(active))
+	}
+
+	// Delete.
+	if err := repo.DeleteSearchProfile(ctx, sp.ID); err != nil {
+		t.Fatalf("DeleteSearchProfile: %v", err)
+	}
+	all, _ = repo.ListAllSearchProfiles(ctx)
+	if len(all) != 0 {
+		t.Errorf("profile should be gone, got %d", len(all))
+	}
+	if err := repo.DeleteSearchProfile(ctx, 999); err == nil {
+		t.Error("deleting missing profile should error")
 	}
 }
 

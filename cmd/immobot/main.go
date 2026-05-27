@@ -29,6 +29,7 @@ import (
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
 	"github.com/julianbeese/immo_bot/internal/scheduler"
 	"github.com/julianbeese/immo_bot/internal/scraper/is24"
+	"github.com/julianbeese/immo_bot/internal/web"
 )
 
 func main() {
@@ -278,6 +279,16 @@ func main() {
 		}
 		defer waClient.Disconnect()
 		logger.Info("WhatsApp command listener started")
+	}
+
+	// Start web dashboard (localhost by default)
+	if cfg.Web.Enabled {
+		websrv := web.New(repo, ctrl, cfg, sched.GetStats, logger)
+		go func() {
+			if err := websrv.Start(ctx, cfg.Web.Addr); err != nil {
+				logger.Error("web dashboard failed", "error", err)
+			}
+		}()
 	}
 
 	// Get profile count for startup notification

@@ -169,6 +169,24 @@ func (r *Repository) GetActiveSearchProfiles(ctx context.Context) ([]domain.Sear
 	return profiles, rows.Err()
 }
 
+// SetSearchProfileActive enables or disables a search profile by ID.
+func (r *Repository) SetSearchProfileActive(ctx context.Context, id int64, active bool) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE search_profiles SET active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		active, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("no search profile with id %d", id)
+	}
+	return nil
+}
+
 // Listing methods
 
 // CreateListing inserts a new listing if it doesn't exist

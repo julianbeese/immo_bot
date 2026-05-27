@@ -30,6 +30,11 @@ type Controller struct {
 	// Callbacks providing extra info for /status and /stats.
 	onStatusRequest func() string
 	onStatsRequest  func() string
+
+	// Callbacks for managing search profiles (need DB access, injected by main).
+	onAddProfile   func(url, name string) string
+	onListProfiles func() string
+	onDelProfile   func(id string) string
 }
 
 // New creates a controller with the default state: auto-contact on, quiet hours on.
@@ -46,10 +51,41 @@ func (c *Controller) SetCallbacks(onStatus, onStats func() string) {
 	c.onStatsRequest = onStats
 }
 
+// SetProfileCallbacks wires the search-profile management commands.
+func (c *Controller) SetProfileCallbacks(onAdd func(url, name string) string, onList func() string, onDel func(id string) string) {
+	c.onAddProfile = onAdd
+	c.onListProfiles = onList
+	c.onDelProfile = onDel
+}
+
 // HandleCommand normalizes a raw chat message and returns the response text.
 // Accepts both slash and plain forms: "/contact_on", "contact on", "Status".
 // Returns "" if the message is not a recognized command (caller may ignore it).
 func (c *Controller) HandleCommand(raw string) string {
+	// Argument commands are routed by their first token so the rest (URL, id,
+	// name) is preserved. No-arg commands fall through to normalizeCommand.
+	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(raw), "/"))
+	if len(fields) == 0 {
+		return ""
+	}
+	switch strings.ToLower(fields[0]) {
+	case "addprofil", "addprofile", "addprof":
+		return c.handleAddProfile(fields[1:])
+	case "listprofile", "listprofiles", "profile", "profiles":
+		if c.onListProfiles != nil {
+			return c.onListProfiles()
+		}
+		return "Profil-Verwaltung nicht verfügbar."
+	case "delprofil", "delprofile", "delprof":
+		if len(fields) < 2 {
+			return "Nutzung: /delprofil <id>"
+		}
+		if c.onDelProfile != nil {
+			return c.onDelProfile(fields[1])
+		}
+		return "Profil-Verwaltung nicht verfügbar."
+	}
+
 	cmd := normalizeCommand(raw)
 	if cmd == "" {
 		return ""
@@ -102,6 +138,24 @@ func normalizeCommand(raw string) string {
 	return s
 }
 
+// handleAddProfile validates the URL argument and delegates creation to the
+// injected callback. Usage: addprofil <url> [name...].
+func (c *Controller) handleAddProfile(args []string) string {
+	if len(args) == 0 || !looksLikeURL(args[0]) {
+		return "Nutzung: /addprofil <IS24-Such-URL> [Name]\n\nErst auf immobilienscout24.de die Suche bauen, dann die URL hierher kopieren."
+	}
+	if c.onAddProfile == nil {
+		return "Profil-Verwaltung nicht verfügbar."
+	}
+	url := args[0]
+	name := strings.TrimSpace(strings.Join(args[1:], " "))
+	return c.onAddProfile(url, name)
+}
+
+func looksLikeURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
 func (c *Controller) helpMessage() string {
 	return `🏠 *ImmoBot Befehle*
 
@@ -113,6 +167,11 @@ func (c *Controller) helpMessage() string {
 *Ruhezeiten:*
 /quiet_on - Ruhezeiten an (22:00-07:00)
 /quiet_off - Ruhezeiten aus (24/7)
+
+*Suchprofile:*
+/addprofil <URL> [Name] - Profil aus IS24-Such-URL anlegen
+/listprofile - Aktive Profile anzeigen
+/delprofil <id> - Profil deaktivieren
 
 *Info:*
 /status - Aktueller Bot-Status

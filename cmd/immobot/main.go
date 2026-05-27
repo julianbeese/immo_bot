@@ -271,14 +271,16 @@ func main() {
 		logger.Info("Telegram command listener started")
 	}
 
-	// Connect WhatsApp (prints QR on first run) and start its command listener
+	// Connect WhatsApp (prints a pairing code on first run) and start its command
+	// listener. A connection/pairing failure is non-fatal: the bot keeps running
+	// (dashboard, Telegram, scraping) so a transient WhatsApp issue can't crash-loop it.
 	if waClient.IsEnabled() {
 		if err := waClient.Connect(ctx); err != nil {
-			logger.Error("failed to connect WhatsApp", "error", err)
-			os.Exit(1)
+			logger.Error("WhatsApp connect failed, continuing without WhatsApp", "error", err)
+		} else {
+			defer waClient.Disconnect()
+			logger.Info("WhatsApp command listener started")
 		}
-		defer waClient.Disconnect()
-		logger.Info("WhatsApp command listener started")
 	}
 
 	// Start web dashboard (localhost by default)

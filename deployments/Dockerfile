@@ -44,6 +44,9 @@ ENV TZ=Europe/Berlin
 ENV DATABASE_PATH=/app/data/immobot.db
 ENV LOG_LEVEL=info
 
+# Web dashboard port (only reachable if WEB_ENABLED=true; published to host loopback)
+EXPOSE 8080
+
 # Health check: verify the bot completed a poll recently (heartbeat in DB).
 # Generous start period to cover first WhatsApp QR pairing / initial poll.
 HEALTHCHECK --interval=60s --timeout=15s --start-period=5m --retries=3 \

@@ -159,6 +159,29 @@ Auf immobilienscout24.de die Suche bauen (Stadt, Umkreis, Preis …), URL kopier
 
 Mehrere aktive Profile = parallele Suchen, je nach Kampagne unterschiedlich angeschrieben.
 
+## Web-Dashboard (optional)
+
+Schlanke lokale Weboberfläche: Status auf einen Blick (gefunden / benachrichtigt / kontaktiert),
+gefundene Wohnungen mit Status-Badges, Kontakt-Modus + Ruhezeiten umschalten, Suchprofile
+anlegen/pausieren/löschen. Teilt sich den State mit dem Bot — Änderungen wirken sofort auch in
+Telegram/WhatsApp.
+
+Aktivieren:
+```
+WEB_ENABLED=true          # in .env
+# oder config.yaml:  web: { enabled: true, addr: "127.0.0.1:8080" }
+```
+
+**Nur localhost, kein Passwort/TLS.** Auf einer VM nicht öffentlich exponieren — stattdessen vom
+eigenen Rechner tunneln:
+```bash
+ssh -L 8080:localhost:8080 user@deine-vm
+# dann im Browser: http://localhost:8080
+```
+In Docker bindet der Container intern `0.0.0.0:8080`; Compose veröffentlicht ihn nur auf
+`127.0.0.1:8080` des Hosts (siehe `ports:` in `docker-compose.yml`). Der SSH-Tunnel zeigt also auf
+den Host-Port.
+
 ## Hosting
 
 Empfehlung: **kleiner VPS + Docker Compose**. Chrome braucht Speicher — plane **≥ 1 GB RAM**

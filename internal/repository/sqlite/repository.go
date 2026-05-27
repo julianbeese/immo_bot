@@ -175,6 +175,59 @@ func (r *Repository) GetActiveSearchProfiles(ctx context.Context) ([]domain.Sear
 	return profiles, rows.Err()
 }
 
+// ListAllSearchProfiles returns all search profiles (active and inactive).
+func (r *Repository) ListAllSearchProfiles(ctx context.Context) ([]domain.SearchProfile, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, name, city, districts, postal_codes, min_price, max_price,
+			min_rooms, max_rooms, min_area, max_area, has_balcony, has_ebk,
+			has_elevator, pets_allowed, min_build_year, max_build_year,
+			exclude_keywords, search_url, category, active, created_at, updated_at
+		FROM search_profiles ORDER BY active DESC, id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var profiles []domain.SearchProfile
+	for rows.Next() {
+		sp, err := scanSearchProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, *sp)
+	}
+	return profiles, rows.Err()
+}
+
+// DeleteSearchProfile permanently removes a search profile by ID. Existing
+// listings are kept but detached (search_profile_id set NULL) to satisfy the
+// foreign key; they fall back to the default campaign in the dashboard.
+func (r *Repository) DeleteSearchProfile(ctx context.Context, id int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE listings SET search_profile_id = NULL WHERE search_profile_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM search_profiles WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("no search profile with id %d", id)
+	}
+	return tx.Commit()
+}
+
 // GetSearchProfileByID returns a single search profile (active or not) by ID.
 func (r *Repository) GetSearchProfileByID(ctx context.Context, id int64) (*domain.SearchProfile, error) {
 	row := r.db.QueryRowContext(ctx, `
@@ -352,12 +405,20 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 
 // GetUnnotifiedListings returns listings that haven't been notified
 func (r *Repository) GetUnnotifiedListings(ctx context.Context) ([]domain.Listing, error) {
-	return r.getListingsByCondition(ctx, "notified = 0")
+	return r.getListingsByCondition(ctx, "notified = 0", "")
 }
 
 // GetUncontactedListings returns listings that haven't been contacted
 func (r *Repository) GetUncontactedListings(ctx context.Context) ([]domain.Listing, error) {
-	return r.getListingsByCondition(ctx, "contacted = 0 AND notified = 1")
+	return r.getListingsByCondition(ctx, "contacted = 0 AND notified = 1", "")
+}
+
+// ListRecentListings returns the most recent listings (for the dashboard).
+func (r *Repository) ListRecentListings(ctx context.Context, limit int) ([]domain.Listing, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	return r.getListingsByCondition(ctx, "1 = 1", fmt.Sprintf("LIMIT %d", limit))
 }
 
 // GetPreviewableListings returns uncontacted listings that have not already
@@ -371,10 +432,10 @@ func (r *Repository) GetPreviewableListings(ctx context.Context) ([]domain.Listi
 			WHERE sent_messages.listing_id = listings.id
 			AND sent_messages.status = 'preview'
 		)
-	`)
+	`, "")
 }
 
-func (r *Repository) getListingsByCondition(ctx context.Context, condition string) ([]domain.Listing, error) {
+func (r *Repository) getListingsByCondition(ctx context.Context, condition, suffix string) ([]domain.Listing, error) {
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, is24_id, title, url, address, city, district, postal_code,
 			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
@@ -382,8 +443,8 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition strin
 			description, landlord_name, landlord_type, image_urls,
 			contact_form_url, search_profile_id, contacted, notified,
 			created_at, updated_at
-		FROM listings WHERE %s ORDER BY created_at DESC
-	`, condition))
+		FROM listings WHERE %s ORDER BY created_at DESC %s
+	`, condition, suffix))
 	if err != nil {
 		return nil, err
 	}

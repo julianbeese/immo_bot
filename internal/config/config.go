@@ -24,6 +24,7 @@ type Config struct {
 	Contact    ContactConfig    `yaml:"contact"`
 	Message    MessageConfig    `yaml:"message"`
 	QuietHours QuietHoursConfig `yaml:"quiet_hours"`
+	Web        WebConfig        `yaml:"web"`
 
 	// DefaultCampaign / Campaigns enable per-search-profile personalization:
 	// a search profile's category selects a campaign (message template, AI
@@ -39,6 +40,12 @@ type Campaign struct {
 	MessageTemplatePath string         `yaml:"message_template_path"`
 	AIPrompt            string         `yaml:"ai_prompt"`
 	Contact             ContactProfile `yaml:"contact_profile"`
+}
+
+// WebConfig for the local web dashboard.
+type WebConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Addr    string `yaml:"addr"` // listen address, default 127.0.0.1:8080 (localhost only)
 }
 
 // WhatsAppConfig for WhatsApp control via whatsmeow (linked device).
@@ -164,6 +171,10 @@ func DefaultConfig() *Config {
 			End:      "07:00",
 			Timezone: "Europe/Berlin",
 		},
+		Web: WebConfig{
+			Enabled: false,
+			Addr:    "127.0.0.1:8080",
+		},
 	}
 }
 
@@ -222,6 +233,10 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("WHATSAPP_LOG_LEVEL"); v != "" {
 		cfg.WhatsApp.LogLevel = v
 	}
+	if err := applyEnvBool("WEB_ENABLED", &cfg.Web.Enabled); err != nil {
+		return nil, err
+	}
+	applyEnvString("WEB_ADDR", &cfg.Web.Addr)
 	if err := applyEnvBool("CONTACT_ENABLED", &cfg.Contact.Enabled); err != nil {
 		return nil, err
 	}

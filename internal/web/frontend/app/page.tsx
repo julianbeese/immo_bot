@@ -13,18 +13,13 @@ import {
   ShieldAlert,
   Play,
   Pause,
-  Power,
   Home,
   CheckCircle2,
   BellRing,
   Eye,
   Settings,
   Search,
-  Check,
-  AlertTriangle,
   Building,
-  DollarSign,
-  Maximize,
   Wand2,
   Save,
   RotateCcw,
@@ -43,6 +38,16 @@ const VIEWS: { key: View; label: string; icon: React.ComponentType<{ className?:
   { key: "templates", label: "Nachrichten",       icon: Wand2 },
   { key: "listings",  label: "Wohnungen",         icon: Home },
 ]
+
+const STATUS_TONE = {
+  active: "border border-border bg-foreground text-background dark:bg-foreground dark:text-background",
+  medium: "border border-border bg-muted text-foreground",
+  quiet: "border border-border bg-muted/40 text-muted-foreground",
+  subtle: "border border-border bg-muted/20 text-muted-foreground",
+}
+
+const errorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback
 
 import { Button } from "@/components/ui/button"
 import {
@@ -139,6 +144,18 @@ interface Listing {
   created_at: string
 }
 
+const EMPTY_OVERVIEW: Overview = {
+  contact_mode: "off",
+  contact_label: "aus",
+  quiet_hours: false,
+  quiet_hours_start: "22:00",
+  quiet_hours_end: "07:00",
+  last_poll: "",
+  default_campaign: "",
+  campaigns: [],
+  stats: { total: 0, notified: 0, contacted: 0 },
+}
+
 function sectionSubtitle(view: View, o: Overview): string {
   switch (view) {
     case "overview":  return `${o.stats.total} Wohnungen gefunden, ${o.stats.notified} benachrichtigt, ${o.stats.contacted} kontaktiert.`
@@ -223,11 +240,11 @@ export default function DashboardPage() {
       })
 
       setError(null)
-    } catch (e: any) {
-      console.error(e)
-      setError(e.message || "Fehler beim Laden der Daten")
+    } catch (e: unknown) {
+      const message = errorMessage(e, "Fehler beim Laden der Daten")
+      setError(message)
       toast.error("Verbindungsfehler", {
-        description: e.message || "Daten konnten nicht aktualisiert werden.",
+        description: message || "Daten konnten nicht aktualisiert werden.",
       })
     } finally {
       setLoading(false)
@@ -237,9 +254,14 @@ export default function DashboardPage() {
 
   // Initial and Interval polling
   React.useEffect(() => {
-    loadData()
+    const initial = window.setTimeout(() => {
+      void loadData()
+    }, 0)
     const interval = setInterval(() => loadData(true), 10000)
-    return () => clearInterval(interval)
+    return () => {
+      window.clearTimeout(initial)
+      clearInterval(interval)
+    }
   }, [loadData])
 
   // Set Settings (Auto Contact Mode / Quiet Hours)
@@ -259,9 +281,9 @@ export default function DashboardPage() {
       toast.success("Einstellungen gespeichert", {
         description: "Änderungen wurden erfolgreich übernommen.",
       })
-    } catch (e: any) {
+    } catch (e: unknown) {
       toast.error("Fehler", {
-        description: e.message || "Einstellungen konnten nicht gespeichert werden.",
+        description: errorMessage(e, "Einstellungen konnten nicht gespeichert werden."),
       })
     }
   }
@@ -282,8 +304,8 @@ export default function DashboardPage() {
       toast.success("Kampagne gespeichert", {
         description: `"${name}" wird ab dem nächsten Suchzyklus verwendet.`,
       })
-    } catch (e: any) {
-      toast.error("Speichern fehlgeschlagen", { description: e.message })
+    } catch (e: unknown) {
+      toast.error("Speichern fehlgeschlagen", { description: errorMessage(e, "Kampagne konnte nicht gespeichert werden.") })
     } finally {
       setSavingCampaign(null)
     }
@@ -308,8 +330,8 @@ export default function DashboardPage() {
       toast.success("Cookie aktualisiert", {
         description: "Nächster Poll-Zyklus nutzt den neuen Cookie. Kein Restart nötig.",
       })
-    } catch (e: any) {
-      toast.error("Speichern fehlgeschlagen", { description: e.message })
+    } catch (e: unknown) {
+      toast.error("Speichern fehlgeschlagen", { description: errorMessage(e, "Cookie konnte nicht gespeichert werden.") })
     } finally {
       setSavingCookie(false)
     }
@@ -328,8 +350,8 @@ export default function DashboardPage() {
       setCampaigns(prev => prev.map(c => (c.name === name ? updated : c)))
       setDrafts(prev => ({ ...prev, [name]: { ai_prompt: updated.ai_prompt, template: updated.template } }))
       toast.success("Auf Standard zurückgesetzt")
-    } catch (e: any) {
-      toast.error("Zurücksetzen fehlgeschlagen", { description: e.message })
+    } catch (e: unknown) {
+      toast.error("Zurücksetzen fehlgeschlagen", { description: errorMessage(e, "Kampagne konnte nicht zurückgesetzt werden.") })
     } finally {
       setSavingCampaign(null)
     }
@@ -350,9 +372,9 @@ export default function DashboardPage() {
       )
       
       toast.success(active ? "Profil aktiviert" : "Profil pausiert")
-    } catch (e: any) {
+    } catch (e: unknown) {
       toast.error("Fehler beim Umschalten", {
-        description: e.message,
+        description: errorMessage(e, "Profilstatus konnte nicht geändert werden."),
       })
     }
   }
@@ -364,9 +386,9 @@ export default function DashboardPage() {
       await api(`/api/profiles/${id}`, { method: "DELETE" })
       setProfiles(prev => prev.filter(p => p.id !== id))
       toast.success("Profil gelöscht")
-    } catch (e: any) {
+    } catch (e: unknown) {
       toast.error("Löschen fehlgeschlagen", {
-        description: e.message,
+        description: errorMessage(e, "Profil konnte nicht gelöscht werden."),
       })
     }
   }
@@ -380,13 +402,14 @@ export default function DashboardPage() {
     }
     
     setSubmittingProfile(true)
+    const category = newProfile.category || overview?.default_campaign || overview?.campaigns[0] || ""
     try {
       await api("/api/profiles", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: newProfile.url.trim(),
-          category: newProfile.category || undefined,
+          category: category || undefined,
           name: newProfile.name.trim() || undefined,
         }),
       })
@@ -400,9 +423,9 @@ export default function DashboardPage() {
       
       // Reload lists
       await loadData()
-    } catch (e: any) {
+    } catch (e: unknown) {
       toast.error("Erstellen fehlgeschlagen", {
-        description: e.message,
+        description: errorMessage(e, "Profil konnte nicht erstellt werden."),
       })
     } finally {
       setSubmittingProfile(false)
@@ -440,16 +463,6 @@ export default function DashboardPage() {
     )
   }, [listings, searchQuery])
 
-  // Setup default category in form when overview loads
-  React.useEffect(() => {
-    if (overview && !newProfile.category) {
-      setNewProfile(prev => ({
-        ...prev,
-        category: overview.default_campaign || overview.campaigns[0] || "",
-      }))
-    }
-  }, [overview, newProfile.category])
-
   if (loading && !overview) {
     return (
       <div className="flex h-screen w-screen flex-col items-center justify-center gap-4 bg-background text-foreground transition-colors duration-300">
@@ -459,7 +472,8 @@ export default function DashboardPage() {
     )
   }
 
-  const currentOverview = overview!
+  const currentOverview = overview ?? EMPTY_OVERVIEW
+  const selectedProfileCategory = newProfile.category || currentOverview.default_campaign || currentOverview.campaigns[0] || ""
 
   return (
     <div className="min-h-screen bg-background text-foreground transition-colors duration-300 antialiased font-sans flex">
@@ -482,7 +496,7 @@ export default function DashboardPage() {
                 onClick={() => setView(v.key)}
                 className={`w-full flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
                   active
-                    ? "bg-primary/10 text-primary"
+                    ? "bg-foreground text-background shadow-sm"
                     : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
                 }`}
               >
@@ -498,19 +512,19 @@ export default function DashboardPage() {
           <div
             className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-semibold ${
               currentOverview.contact_mode === "on"
-                ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20"
+                ? STATUS_TONE.active
                 : currentOverview.contact_mode === "test"
-                ? "bg-amber-500/10 text-amber-500 border border-amber-500/20"
-                : "bg-muted/30 text-muted-foreground border border-muted/40"
+                ? STATUS_TONE.medium
+                : STATUS_TONE.quiet
             }`}
             title={currentOverview.contact_label}
           >
             <span
               className={`h-1.5 w-1.5 rounded-full ${
                 currentOverview.contact_mode === "on"
-                  ? "bg-emerald-500 animate-ping"
+                  ? "bg-background animate-ping dark:bg-background"
                   : currentOverview.contact_mode === "test"
-                  ? "bg-amber-500 animate-pulse"
+                  ? "bg-foreground animate-pulse"
                   : "bg-muted-foreground"
               }`}
             />
@@ -538,7 +552,7 @@ export default function DashboardPage() {
               title="Design umschalten"
             >
               {resolvedTheme === "dark" ? (
-                <Sun className="h-4 w-4 text-amber-500" />
+                <Sun className="h-4 w-4 text-foreground" />
               ) : (
                 <Moon className="h-4 w-4 text-primary" />
               )}
@@ -584,7 +598,7 @@ export default function DashboardPage() {
 
       {/* Main content area — only the active section is rendered. */}
       <main className="flex-1 min-w-0 p-4 sm:p-6 md:p-8 space-y-6 mt-12 md:mt-0">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-xl font-bold tracking-tight">
               {VIEWS.find(v => v.key === view)?.label}
@@ -596,16 +610,16 @@ export default function DashboardPage() {
         </div>
 
         {error && (
-          <div className="flex items-center gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">
+          <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/40 p-4 text-sm text-foreground sm:flex-row sm:items-center">
             <ShieldAlert className="h-5 w-5 shrink-0" />
-            <div>
+            <div className="min-w-0 flex-1">
               <h5 className="font-semibold">Verbindungsfehler zum Backend</h5>
-              <p className="text-xs text-destructive/80 mt-0.5">{error}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{error}</p>
             </div>
             <Button
               variant="outline"
               size="sm"
-              className="ml-auto border-destructive/20 hover:bg-destructive/20 text-destructive bg-transparent"
+              className="bg-transparent sm:ml-auto"
               onClick={() => loadData()}
             >
               Erneut versuchen
@@ -625,9 +639,9 @@ export default function DashboardPage() {
               {/* Contact Mode Select */}
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-muted-foreground">Kontakt-Modus</label>
-                <div className="flex w-full items-center justify-between rounded-lg border p-2 bg-muted/10">
+                <div className="flex w-full flex-col gap-3 rounded-lg border p-3 bg-muted/10 sm:flex-row sm:items-center sm:justify-between">
                   <span className="text-sm font-medium">Bewerbungen:</span>
-                  <div className="inline-flex rounded-md border p-1 bg-muted/40 text-xs">
+                  <div className="grid grid-cols-3 rounded-md border p-1 bg-muted/40 text-xs sm:inline-flex">
                     <Button
                       variant={currentOverview.contact_mode === "off" ? "default" : "ghost"}
                       size="sm"
@@ -650,7 +664,7 @@ export default function DashboardPage() {
                       onClick={() => setSetting({ contact_mode: "on" })}
                       className={`h-7 gap-1 px-3 text-xs font-medium rounded transition-colors ${
                         currentOverview.contact_mode === "on"
-                          ? "bg-emerald-600 hover:bg-emerald-600 text-white font-semibold shadow-sm"
+                          ? "bg-foreground hover:bg-foreground text-background font-semibold shadow-sm"
                           : ""
                       }`}
                     >
@@ -670,9 +684,9 @@ export default function DashboardPage() {
                   <div className="flex items-center gap-3">
                     <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted/30">
                       {currentOverview.quiet_hours ? (
-                        <Moon className="h-4 w-4 text-indigo-500 fill-indigo-500/20" />
+                        <Moon className="h-4 w-4 text-foreground" />
                       ) : (
-                        <Sun className="h-4 w-4 text-amber-500" />
+                        <Sun className="h-4 w-4 text-muted-foreground" />
                       )}
                     </div>
                     <Switch
@@ -721,10 +735,10 @@ export default function DashboardPage() {
                     variant="outline"
                     className={`text-xs px-2.5 py-1 ${
                       currentOverview.contact_mode === "on"
-                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 border-emerald-500/20"
+                        ? STATUS_TONE.active
                         : currentOverview.contact_mode === "test"
-                        ? "bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20"
-                        : "bg-muted/30 text-muted-foreground"
+                        ? STATUS_TONE.medium
+                        : STATUS_TONE.quiet
                     }`}
                   >
                     {currentOverview.contact_label}
@@ -733,23 +747,23 @@ export default function DashboardPage() {
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Ruhezeit</span>
                   {currentOverview.quiet_hours ? (
-                    <Badge variant="outline" className="text-xs bg-indigo-500/10 text-indigo-500 border-indigo-500/20">
-                      🌙 {currentOverview.quiet_hours_start}–{currentOverview.quiet_hours_end}
+                    <Badge variant="outline" className={`text-xs ${STATUS_TONE.medium}`}>
+                      <Moon className="h-3 w-3" /> {currentOverview.quiet_hours_start}–{currentOverview.quiet_hours_end}
                     </Badge>
                   ) : (
-                    <Badge variant="outline" className="text-xs bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20">
-                      ☀️ 24/7
+                    <Badge variant="outline" className={`text-xs ${STATUS_TONE.subtle}`}>
+                      <Sun className="h-3 w-3" /> 24/7
                     </Badge>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Cookie</span>
                   {cookieInfo?.source === "meta" ? (
-                    <Badge variant="outline" className="text-xs bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 border-emerald-500/20">Override · {cookieInfo.length} Z.</Badge>
+                    <Badge variant="outline" className={`text-xs ${STATUS_TONE.active}`}>Override · {cookieInfo.length} Z.</Badge>
                   ) : cookieInfo?.source === "env" ? (
-                    <Badge variant="outline" className="text-xs bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20">.env · {cookieInfo.length} Z.</Badge>
+                    <Badge variant="outline" className={`text-xs ${STATUS_TONE.medium}`}>.env · {cookieInfo.length} Z.</Badge>
                   ) : (
-                    <Badge variant="outline" className="text-xs bg-destructive/10 text-destructive border-destructive/20">nicht gesetzt</Badge>
+                    <Badge variant="outline" className={`text-xs ${STATUS_TONE.quiet}`}>nicht gesetzt</Badge>
                   )}
                 </div>
                 <div className="flex items-center gap-2 ml-auto">
@@ -779,23 +793,23 @@ export default function DashboardPage() {
             {/* Stat Notified */}
             <Card className="flex flex-col justify-between overflow-hidden shadow-sm border border-border/60 hover:border-border transition-all duration-300">
               <CardHeader className="pb-2">
-                <CardDescription className="text-xs font-semibold uppercase tracking-wider text-amber-500">Notifiziert</CardDescription>
+                <CardDescription className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Notifiziert</CardDescription>
               </CardHeader>
               <CardContent className="pb-6">
-                <span className="text-4xl font-extrabold tracking-tight text-amber-500">{currentOverview.stats.notified}</span>
+                <span className="text-4xl font-extrabold tracking-tight text-foreground">{currentOverview.stats.notified}</span>
               </CardContent>
-              <div className="h-1.5 w-full bg-amber-500/20" />
+              <div className="h-1.5 w-full bg-muted" />
             </Card>
 
             {/* Stat Contacted */}
             <Card className="flex flex-col justify-between overflow-hidden shadow-sm border border-border/60 hover:border-border transition-all duration-300">
               <CardHeader className="pb-2">
-                <CardDescription className="text-xs font-semibold uppercase tracking-wider text-emerald-500">Kontaktiert</CardDescription>
+                <CardDescription className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Kontaktiert</CardDescription>
               </CardHeader>
               <CardContent className="pb-6">
-                <span className="text-4xl font-extrabold tracking-tight text-emerald-500">{currentOverview.stats.contacted}</span>
+                <span className="text-4xl font-extrabold tracking-tight text-foreground">{currentOverview.stats.contacted}</span>
               </CardContent>
-              <div className="h-1.5 w-full bg-emerald-500/20" />
+              <div className="h-1.5 w-full bg-foreground/20" />
             </Card>
           </div>
         </>
@@ -819,10 +833,10 @@ export default function DashboardPage() {
                   variant="outline"
                   className={`text-[10px] ${
                     cookieInfo.source === "meta"
-                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 border-emerald-500/20"
+                      ? STATUS_TONE.active
                       : cookieInfo.source === "env"
-                      ? "bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20"
-                      : "bg-destructive/10 text-destructive border-destructive/20"
+                      ? STATUS_TONE.medium
+                      : STATUS_TONE.quiet
                   }`}
                 >
                   {cookieInfo.source === "meta"
@@ -835,7 +849,7 @@ export default function DashboardPage() {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
               <textarea
                 rows={3}
                 value={cookieDraft}
@@ -846,7 +860,7 @@ export default function DashboardPage() {
               <Button
                 onClick={saveCookie}
                 disabled={savingCookie || cookieDraft.trim().length < 50}
-                className="h-auto self-stretch px-4 font-semibold"
+                className="h-10 px-4 font-semibold sm:h-auto sm:self-stretch"
               >
                 {savingCookie ? "Speichert…" : "Übernehmen"}
               </Button>
@@ -857,7 +871,7 @@ export default function DashboardPage() {
 
         {view === "profiles" && (
         <Card className="shadow-sm border border-border/60">
-          <CardHeader className="flex flex-row items-center justify-between pb-4">
+          <CardHeader className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="text-md font-bold tracking-tight">Suchprofile</CardTitle>
               <CardDescription className="text-xs">Aktive Suchabfragen auf Immobilienscout24</CardDescription>
@@ -895,7 +909,7 @@ export default function DashboardPage() {
                     <div className="space-y-1.5">
                       <label htmlFor="campaign" className="text-xs font-bold text-muted-foreground uppercase">Kampagne (Bewerbungsprofil)</label>
                       <Select
-                        value={newProfile.category}
+                        value={selectedProfileCategory}
                         onValueChange={(val) => setNewProfile(prev => ({ ...prev, category: val }))}
                       >
                         <SelectTrigger id="campaign">
@@ -981,7 +995,7 @@ export default function DashboardPage() {
                           <Badge
                             className={`py-0.5 px-2 rounded-full text-[10px] font-semibold tracking-wide ${
                               p.active
-                                ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20"
+                                ? STATUS_TONE.active
                                 : "bg-muted text-muted-foreground border border-muted-foreground/10"
                             }`}
                           >
@@ -996,16 +1010,16 @@ export default function DashboardPage() {
                             className="h-8 px-2.5 font-medium text-xs gap-1.5"
                           >
                             {p.active ? (
-                              <><Pause className="h-3.5 w-3.5 text-amber-500" /> Pause</>
+                              <><Pause className="h-3.5 w-3.5" /> Pause</>
                             ) : (
-                              <><Play className="h-3.5 w-3.5 text-emerald-500" /> Aktiv</>
+                              <><Play className="h-3.5 w-3.5" /> Aktiv</>
                             )}
                           </Button>
                           <Button
                             variant="ghost"
                             size="icon"
                             onClick={() => deleteProfile(p.id)}
-                            className="h-8 w-8 hover:bg-destructive/10 hover:text-destructive text-muted-foreground"
+                            className="h-8 w-8 text-muted-foreground hover:bg-muted hover:text-foreground"
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -1050,7 +1064,7 @@ export default function DashboardPage() {
                 "w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs font-mono shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
               return (
                 <div key={c.name} className="rounded-lg border border-border/60 p-4 space-y-4 bg-muted/5">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div className="flex items-center gap-2">
                       <span className="font-semibold text-sm">{c.name}</span>
                       {c.name === currentOverview.default_campaign && (
@@ -1058,12 +1072,12 @@ export default function DashboardPage() {
                       )}
                       <Badge
                         variant="outline"
-                        className={`text-[10px] ${overridden ? "bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20" : "bg-muted/20 text-muted-foreground"}`}
+                        className={`text-[10px] ${overridden ? STATUS_TONE.medium : "bg-muted/20 text-muted-foreground"}`}
                       >
                         {overridden ? "angepasst" : "Standard (config.yaml)"}
                       </Badge>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Button
                         variant="ghost"
                         size="sm"
@@ -1127,14 +1141,14 @@ export default function DashboardPage() {
 
         {view === "listings" && (
         <Card className="shadow-sm border border-border/60">
-          <CardHeader className="flex flex-row items-center justify-between pb-4">
+          <CardHeader className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="text-md font-bold tracking-tight">Gefundene Wohnungen</CardTitle>
               <CardDescription className="text-xs">Übersicht der {listings.length} neuesten Immobilienfunde</CardDescription>
             </div>
             
             {/* Interactive Search Filter */}
-            <div className="relative w-full max-w-[280px]">
+            <div className="relative w-full sm:max-w-[280px]">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
                 placeholder="Filtern..."
@@ -1197,11 +1211,11 @@ export default function DashboardPage() {
                           </Badge>
                         </TableCell>
                         <TableCell className="text-right">
-                          <div className="inline-flex gap-1.5 justify-end">
+                          <div className="inline-flex flex-wrap gap-1.5 justify-end">
                             {l.notified && (
                               <Badge
                                 variant="outline"
-                                className="h-6 gap-1 bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20 text-[10px] font-bold px-2 rounded-full"
+                                className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.medium}`}
                               >
                                 <BellRing className="h-3 w-3" /> benachrichtigt
                               </Badge>
@@ -1209,7 +1223,7 @@ export default function DashboardPage() {
                             {l.contacted && (
                               <Badge
                                 variant="outline"
-                                className="h-6 gap-1 bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 border-emerald-500/20 text-[10px] font-bold px-2 rounded-full"
+                                className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.active}`}
                               >
                                 <CheckCircle2 className="h-3 w-3" /> kontaktiert
                               </Badge>

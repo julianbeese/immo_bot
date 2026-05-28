@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
@@ -15,11 +16,19 @@ import (
 
 // BrowserClient uses chromedp for scraping (bypasses WAF)
 type BrowserClient struct {
+	mu          sync.RWMutex // guards cookie for hot-reload via SetCookie
 	cookie      string
 	rateLimiter *antidetect.RateLimiter
 	parser      *Parser
 	chromePath  string
 	debug       bool
+}
+
+// currentCookie returns a snapshot of the current cookie value under RLock.
+func (c *BrowserClient) currentCookie() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cookie
 }
 
 // NewBrowserClient creates a new browser-based IS24 client
@@ -143,11 +152,12 @@ func (c *BrowserClient) fetchPage(ctx context.Context, url string) (string, erro
 
 	var html string
 
-	// Set cookies before navigating
+	// Set cookies before navigating (snapshot under lock to allow hot-reload).
 	actions := []chromedp.Action{}
 
-	if c.cookie != "" {
-		cookies := parseCookieString(c.cookie)
+	cookieStr := c.currentCookie()
+	if cookieStr != "" {
+		cookies := parseCookieString(cookieStr)
 		for _, cookie := range cookies {
 			actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
 				return network.SetCookie(cookie.Name, cookie.Value).
@@ -188,7 +198,11 @@ func (c *BrowserClient) fetchPage(ctx context.Context, url string) (string, erro
 	return html, nil
 }
 
-// SetCookie updates the client's cookie
-func (c *BrowserClient) SetCookie(cookie string) {
+// SetCookie updates the client's cookie. The next request applies it via the
+// chromedp network.SetCookie path in fetchPage; no jar to rebuild.
+func (c *BrowserClient) SetCookie(cookie string) error {
+	c.mu.Lock()
 	c.cookie = cookie
+	c.mu.Unlock()
+	return nil
 }

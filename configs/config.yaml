@@ -9,6 +9,14 @@ web:
   enabled: false
   addr: "127.0.0.1:8080"
 
+# Periodic SQLite snapshots via VACUUM INTO. Output is a single .db file per
+# run (atomic, safe while bot is scraping). Retention prunes by mtime.
+backup:
+  enabled: true
+  interval: 24h
+  retention_days: 7
+  dir: "data/backups"
+
 is24:
   cookie: ""  # Set via IS24_COOKIE env var or paste here
   max_requests_per_minute: 10

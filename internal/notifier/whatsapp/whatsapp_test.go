@@ -62,7 +62,7 @@ func TestFormatListingContainsKeyFacts(t *testing.T) {
 }
 
 func TestDisabledClientIsNoOp(t *testing.T) {
-	c, err := New(context.Background(), config.WhatsAppConfig{Enabled: false}, control.New(), nil)
+	c, err := New(context.Background(), config.WhatsAppConfig{Enabled: false}, control.New(nil, nil, control.Defaults{QuietHoursEnabled: true, QuietHoursStart: "22:00", QuietHoursEnd: "07:00", Timezone: "Europe/Berlin"}), nil)
 	if err != nil {
 		t.Fatalf("disabled New should not error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestDisabledClientIsNoOp(t *testing.T) {
 }
 
 func TestEnabledWithoutTargetErrors(t *testing.T) {
-	_, err := New(context.Background(), config.WhatsAppConfig{Enabled: true, StorePath: t.TempDir() + "/x.db"}, control.New(), nil)
+	_, err := New(context.Background(), config.WhatsAppConfig{Enabled: true, StorePath: t.TempDir() + "/x.db"}, control.New(nil, nil, control.Defaults{QuietHoursEnabled: true, QuietHoursStart: "22:00", QuietHoursEnd: "07:00", Timezone: "Europe/Berlin"}), nil)
 	if err == nil {
 		t.Error("enabled client without target_phone should error")
 	}

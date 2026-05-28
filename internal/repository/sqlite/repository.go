@@ -22,6 +22,11 @@ var migrationsFS embed.FS
 // successful poll cycle; used by the container health check.
 const MetaLastPollOK = "last_poll_ok"
 
+// MetaIS24Cookie is the meta key holding a hot-reloaded IS24 cookie override.
+// If set (non-empty), it takes precedence over IS24_COOKIE at startup; updates
+// happen via the dashboard or the /cookie chat command.
+const MetaIS24Cookie = "is24.cookie"
+
 // CampaignPromptKey / CampaignTemplateKey are the meta-table keys under which
 // dashboard-edited per-campaign overrides (AI system prompt, message template)
 // are persisted. Shared by the scheduler (reads at send time) and the web
@@ -298,6 +303,19 @@ func scanSearchProfile(s rowScanner) (*domain.SearchProfile, error) {
 	sp.PetsAllowed = nullBoolPtr(petsAllowed)
 
 	return &sp, nil
+}
+
+// VacuumInto writes an atomic snapshot of the live database to the given
+// path. The output is a single .db file (no WAL artefacts to copy) that any
+// sqlite client can open. The target file is created or overwritten.
+//
+// VACUUM INTO does not support bound parameters for the destination path, so
+// the path is interpolated; we quote any single quotes to avoid breaking out
+// of the SQL string literal (paths under our control, but cheap to be safe).
+func (r *Repository) VacuumInto(ctx context.Context, path string) error {
+	quoted := strings.ReplaceAll(path, "'", "''")
+	_, err := r.db.ExecContext(ctx, fmt.Sprintf("VACUUM INTO '%s'", quoted))
+	return err
 }
 
 // SetMeta upserts a key/value pair in the meta table.

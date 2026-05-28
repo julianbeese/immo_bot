@@ -6,15 +6,16 @@ services:
     container_name: immobot
     restart: unless-stopped
 
-    # Resource limits
+    # Resource limits — Chrome scrape peaks ~400 MiB; bumped to 1 GiB to keep
+    # headroom for OpenAI calls + the daily backup vacuum running in parallel.
     deploy:
       resources:
         limits:
+          cpus: '1.0'
+          memory: 1024M
+        reservations:
           cpus: '0.5'
           memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 256M
 
     # Shared memory for Chrome
     shm_size: 256mb
@@ -53,6 +54,10 @@ services:
       - CONTACT_EMAIL=${CONTACT_EMAIL:-}
       - CONTACT_PHONE=${CONTACT_PHONE:-}
       - CONTACT_ADULTS=${CONTACT_ADULTS:-}
+      - BACKUP_ENABLED=${BACKUP_ENABLED:-true}
+      - BACKUP_INTERVAL=${BACKUP_INTERVAL:-24h}
+      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
+      - BACKUP_DIR=${BACKUP_DIR:-data/backups}
 
     # Logging
     logging:

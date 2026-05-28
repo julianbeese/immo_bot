@@ -30,10 +30,10 @@ func newTestServer(t *testing.T) (*Server, *control.Controller) {
 			"wg":     {AIPrompt: "w"},
 		},
 	}
-	ctrl := control.New()
+	ctrl := control.New(nil, nil, control.Defaults{QuietHoursEnabled: true, QuietHoursStart: "22:00", QuietHoursEnd: "07:00", Timezone: "Europe/Berlin"})
 	// StatsFunc returns (total, contacted, notified).
 	stats := func(context.Context) (int, int, int) { return 5, 1, 3 }
-	return New(repo, ctrl, cfg, stats, slog.Default()), ctrl
+	return New(repo, ctrl, cfg, stats, nil /* CookieSetter */, slog.Default()), ctrl
 }
 
 func TestOverview(t *testing.T) {

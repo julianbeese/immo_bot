@@ -1,6 +1,22 @@
 package control
 
-import "testing"
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+)
+
+// newTestCtrl builds a controller with no persistence and quiet-hours-on
+// defaults — matches the pre-persistence behaviour the older tests rely on.
+func newTestCtrl() *Controller {
+	return New(nil, nil, Defaults{
+		QuietHoursEnabled: true,
+		QuietHoursStart:   "22:00",
+		QuietHoursEnd:     "07:00",
+		Timezone:          "Europe/Berlin",
+	})
+}
 
 func TestNormalizeCommand(t *testing.T) {
 	cases := map[string]string{
@@ -24,7 +40,7 @@ func TestNormalizeCommand(t *testing.T) {
 }
 
 func TestHandleCommandTransitions(t *testing.T) {
-	c := New()
+	c := newTestCtrl()
 
 	// Safe defaults: test mode (no live contact), quiet hours on.
 	if c.IsAutoContactEnabled() {
@@ -68,7 +84,7 @@ func TestHandleCommandTransitions(t *testing.T) {
 }
 
 func TestHandleCommandResponses(t *testing.T) {
-	c := New()
+	c := newTestCtrl()
 	if got := c.HandleCommand(""); got != "" {
 		t.Errorf("empty input should yield empty response, got %q", got)
 	}
@@ -81,7 +97,7 @@ func TestHandleCommandResponses(t *testing.T) {
 }
 
 func TestStatsCallback(t *testing.T) {
-	c := New()
+	c := newTestCtrl()
 	// Without callback, stats has a fallback.
 	if got := c.HandleCommand("/stats"); got == "" {
 		t.Error("stats without callback should still respond")
@@ -96,7 +112,7 @@ func TestStatsCallback(t *testing.T) {
 }
 
 func TestProfileCommands(t *testing.T) {
-	c := New()
+	c := newTestCtrl()
 	var gotCat, gotURL, gotName, gotDel string
 	c.SetProfileCallbacks(
 		func(category, url, name string) string { gotCat, gotURL, gotName = category, url, name; return "ADDED" },
@@ -137,7 +153,7 @@ func TestProfileCommands(t *testing.T) {
 }
 
 func TestProfileCommandValidation(t *testing.T) {
-	c := New()
+	c := newTestCtrl()
 	c.SetProfileCallbacks(
 		func(category, url, name string) string { return "ADDED" },
 		func() string { return "LIST" },
@@ -158,7 +174,7 @@ func TestProfileCommandValidation(t *testing.T) {
 }
 
 func TestProfileCommandsWithoutCallbacks(t *testing.T) {
-	c := New() // no SetProfileCallbacks
+	c := newTestCtrl() // no SetProfileCallbacks
 	if got := c.HandleCommand("/addprofil https://is24.de/x"); got == "" {
 		t.Error("addprofil without callback should return a message, not empty")
 	}
@@ -168,10 +184,160 @@ func TestProfileCommandsWithoutCallbacks(t *testing.T) {
 }
 
 func TestIsQuietHoursReturnsCopy(t *testing.T) {
-	c := New()
+	c := newTestCtrl()
 	v := c.IsQuietHoursEnabled()
 	*v = false // mutating the returned pointer must not affect internal state
 	if v2 := c.IsQuietHoursEnabled(); v2 == nil || !*v2 {
 		t.Error("returned pointer must be a copy, internal state changed")
 	}
+}
+
+// memStore is a goroutine-safe in-memory SettingsStore for tests.
+type memStore struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+func newMemStore(seed map[string]string) *memStore {
+	s := &memStore{m: map[string]string{}}
+	for k, v := range seed {
+		s.m[k] = v
+	}
+	return s
+}
+
+func (s *memStore) GetMeta(_ context.Context, k string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.m[k], nil
+}
+
+func (s *memStore) SetMeta(_ context.Context, k, v string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[k] = v
+	return nil
+}
+
+func TestPersistsSettingsToStore(t *testing.T) {
+	store := newMemStore(nil)
+	c := New(store, nil, Defaults{QuietHoursEnabled: true, QuietHoursStart: "22:00", QuietHoursEnd: "07:00", Timezone: "Europe/Berlin"})
+
+	c.SetContactMode(ContactModeOn)
+	c.SetQuietHours(false)
+	if err := c.SetQuietHoursWindow("23:30", "06:15"); err != nil {
+		t.Fatalf("SetQuietHoursWindow: %v", err)
+	}
+
+	if got := store.m[MetaContactMode]; got != "on" {
+		t.Errorf("contact mode persisted = %q, want on", got)
+	}
+	if got := store.m[MetaQuietHoursEnabled]; got != "false" {
+		t.Errorf("quiet enabled persisted = %q, want false", got)
+	}
+	if got := store.m[MetaQuietHoursStart]; got != "23:30" {
+		t.Errorf("quiet start persisted = %q", got)
+	}
+	if got := store.m[MetaQuietHoursEnd]; got != "06:15" {
+		t.Errorf("quiet end persisted = %q", got)
+	}
+}
+
+func TestReloadsSettingsFromStore(t *testing.T) {
+	store := newMemStore(map[string]string{
+		MetaContactMode:       "on",
+		MetaQuietHoursEnabled: "false",
+		MetaQuietHoursStart:   "20:00",
+		MetaQuietHoursEnd:     "05:00",
+	})
+	c := New(store, nil, Defaults{QuietHoursEnabled: true, QuietHoursStart: "22:00", QuietHoursEnd: "07:00", Timezone: "Europe/Berlin"})
+
+	if !c.IsAutoContactEnabled() {
+		t.Error("contact mode should reload as ContactModeOn")
+	}
+	if v := c.IsQuietHoursEnabled(); v == nil || *v {
+		t.Error("quiet hours should reload as false")
+	}
+	if s, e := c.QuietHoursWindow(); s != "20:00" || e != "05:00" {
+		t.Errorf("quiet window reload = %q/%q, want 20:00/05:00", s, e)
+	}
+}
+
+func TestSetQuietHoursWindowRejectsGarbage(t *testing.T) {
+	c := newTestCtrl()
+	if err := c.SetQuietHoursWindow("99:00", "07:00"); err == nil {
+		t.Error("hour > 23 should be rejected")
+	}
+	if err := c.SetQuietHoursWindow("22:00", "07:99"); err == nil {
+		t.Error("minute > 59 should be rejected")
+	}
+	if err := c.SetQuietHoursWindow("22", "07:00"); err == nil {
+		t.Error("missing colon should be rejected")
+	}
+}
+
+func TestIsWithinQuietHoursOvernight(t *testing.T) {
+	c := newTestCtrl() // 22:00-07:00 Europe/Berlin
+
+	// 03:00 → inside overnight window
+	if !c.IsWithinQuietHours(timeAt(t, 3, 0)) {
+		t.Error("03:00 should be within 22:00-07:00")
+	}
+	// 12:00 → outside
+	if c.IsWithinQuietHours(timeAt(t, 12, 0)) {
+		t.Error("12:00 should be outside 22:00-07:00")
+	}
+	// 22:30 → inside
+	if !c.IsWithinQuietHours(timeAt(t, 22, 30)) {
+		t.Error("22:30 should be within 22:00-07:00")
+	}
+	// 07:00 boundary → end-exclusive → outside
+	if c.IsWithinQuietHours(timeAt(t, 7, 0)) {
+		t.Error("07:00 is end-exclusive, should be outside")
+	}
+}
+
+func TestCookieCommand(t *testing.T) {
+	c := newTestCtrl()
+	var gotCookie string
+	c.SetCookieCallback(func(_ context.Context, cookie string) error {
+		gotCookie = cookie
+		return nil
+	})
+	// Too short → usage hint, callback not called.
+	if got := c.HandleCommand("/cookie short"); got == "" {
+		t.Error("short cookie should produce a usage hint")
+	}
+	if gotCookie != "" {
+		t.Error("short cookie must not reach callback")
+	}
+
+	long := "name1=" + repeat("a", 60) + "; name2=val"
+	if got := c.HandleCommand("/cookie " + long); got == "" {
+		t.Error("valid cookie command should produce a confirmation")
+	}
+	if gotCookie != long {
+		t.Errorf("cookie callback got %q, want %q", gotCookie, long)
+	}
+}
+
+// repeat is a tiny stand-in for strings.Repeat to keep the import set minimal.
+func repeat(s string, n int) string {
+	out := make([]byte, 0, len(s)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, s...)
+	}
+	return string(out)
+}
+
+// timeAt returns a deterministic time.Time anchored in Europe/Berlin so the
+// controller's IsWithinQuietHours (which re-interprets via its own timezone)
+// sees exactly the requested clock value.
+func timeAt(t *testing.T, h, m int) time.Time {
+	t.Helper()
+	loc, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	return time.Date(2026, 1, 15, h, m, 0, 0, loc)
 }

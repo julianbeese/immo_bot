@@ -34,18 +34,24 @@ var frontendFS embed.FS
 // StatsFunc returns aggregate listing counts (total, contacted, notified).
 type StatsFunc func(ctx context.Context) (total, contacted, notified int)
 
+// CookieSetter hot-reloads the IS24 cookie (scheduler-level: applies to the
+// client + persists to meta). Allowed to be nil for tests; the dashboard then
+// rejects the POST instead of panicking.
+type CookieSetter func(ctx context.Context, cookie string) error
+
 // Server is the dashboard HTTP server.
 type Server struct {
-	repo   *sqlite.Repository
-	ctrl   *control.Controller
-	cfg    *config.Config
-	stats  StatsFunc
-	logger *slog.Logger
+	repo      *sqlite.Repository
+	ctrl      *control.Controller
+	cfg       *config.Config
+	stats     StatsFunc
+	setCookie CookieSetter
+	logger    *slog.Logger
 }
 
-// New creates a dashboard server.
-func New(repo *sqlite.Repository, ctrl *control.Controller, cfg *config.Config, stats StatsFunc, logger *slog.Logger) *Server {
-	return &Server{repo: repo, ctrl: ctrl, cfg: cfg, stats: stats, logger: logger}
+// New creates a dashboard server. setCookie may be nil (tests).
+func New(repo *sqlite.Repository, ctrl *control.Controller, cfg *config.Config, stats StatsFunc, setCookie CookieSetter, logger *slog.Logger) *Server {
+	return &Server{repo: repo, ctrl: ctrl, cfg: cfg, stats: stats, setCookie: setCookie, logger: logger}
 }
 
 // Handler returns the dashboard's HTTP routes.
@@ -65,6 +71,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/campaigns", s.handleCampaigns)
 	mux.HandleFunc("POST /api/campaigns/{name}", s.handleSaveCampaign)
 	mux.HandleFunc("POST /api/settings", s.handleSettings)
+	mux.HandleFunc("GET /api/cookie", s.handleGetCookie)
+	mux.HandleFunc("POST /api/cookie", s.handleSetCookie)
 	mux.HandleFunc("POST /api/profiles", s.handleAddProfile)
 	mux.HandleFunc("POST /api/profiles/{id}/active", s.handleSetProfileActive)
 	mux.HandleFunc("DELETE /api/profiles/{id}", s.handleDeleteProfile)
@@ -94,13 +102,16 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	lastPoll, _ := s.repo.GetMeta(r.Context(), sqlite.MetaLastPollOK)
 
+	qStart, qEnd := s.ctrl.QuietHoursWindow()
 	resp := map[string]any{
-		"contact_mode":     modeString(s.ctrl.GetContactMode()),
-		"contact_label":    s.ctrl.ContactModeLabel(),
-		"quiet_hours":      derefBool(s.ctrl.IsQuietHoursEnabled()),
-		"last_poll":        lastPoll,
-		"default_campaign": s.cfg.DefaultCampaign,
-		"campaigns":        s.campaignNames(),
+		"contact_mode":      modeString(s.ctrl.GetContactMode()),
+		"contact_label":     s.ctrl.ContactModeLabel(),
+		"quiet_hours":       derefBool(s.ctrl.IsQuietHoursEnabled()),
+		"quiet_hours_start": qStart,
+		"quiet_hours_end":   qEnd,
+		"last_poll":         lastPoll,
+		"default_campaign":  s.cfg.DefaultCampaign,
+		"campaigns":         s.campaignNames(),
 		"stats": map[string]int{
 			"total":     total,
 			"notified":  notified,
@@ -228,8 +239,10 @@ func (s *Server) handleSaveCampaign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ContactMode *string `json:"contact_mode"`
-		QuietHours  *bool   `json:"quiet_hours"`
+		ContactMode     *string `json:"contact_mode"`
+		QuietHours      *bool   `json:"quiet_hours"`
+		QuietHoursStart *string `json:"quiet_hours_start"`
+		QuietHoursEnd   *string `json:"quiet_hours_end"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -246,7 +259,72 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if body.QuietHours != nil {
 		s.ctrl.SetQuietHours(*body.QuietHours)
 	}
+	// Quiet-hours window is set as a pair. Allow updating one side by passing
+	// the existing value for the other (frontend does this automatically).
+	if body.QuietHoursStart != nil || body.QuietHoursEnd != nil {
+		curStart, curEnd := s.ctrl.QuietHoursWindow()
+		newStart := curStart
+		newEnd := curEnd
+		if body.QuietHoursStart != nil {
+			newStart = *body.QuietHoursStart
+		}
+		if body.QuietHoursEnd != nil {
+			newEnd = *body.QuietHoursEnd
+		}
+		if err := s.ctrl.SetQuietHoursWindow(newStart, newEnd); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	s.handleOverview(w, r)
+}
+
+// handleGetCookie reports cookie presence without ever leaking the cookie
+// itself. Source = "meta" means a hot-reloaded override is active; "env" means
+// the original IS24_COOKIE env var (or empty config value) is in effect.
+func (s *Server) handleGetCookie(w http.ResponseWriter, r *http.Request) {
+	v, _ := s.repo.GetMeta(r.Context(), sqlite.MetaIS24Cookie)
+	resp := map[string]any{
+		"present": v != "" || strings.TrimSpace(s.cfg.IS24.Cookie) != "",
+		"length":  0,
+		"source":  "none",
+	}
+	switch {
+	case v != "":
+		resp["length"] = len(v)
+		resp["source"] = "meta"
+	case strings.TrimSpace(s.cfg.IS24.Cookie) != "":
+		resp["length"] = len(s.cfg.IS24.Cookie)
+		resp["source"] = "env"
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleSetCookie hot-reloads the IS24 cookie via the scheduler-supplied
+// CookieSetter (which applies + persists in one step). Minimal length check
+// guards against pasting a fragment by accident.
+func (s *Server) handleSetCookie(w http.ResponseWriter, r *http.Request) {
+	if s.setCookie == nil {
+		writeErr(w, http.StatusServiceUnavailable, errors.New("cookie setter not wired"))
+		return
+	}
+	var body struct {
+		Cookie string `json:"cookie"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	v := strings.TrimSpace(body.Cookie)
+	if len(v) < 50 {
+		writeErr(w, http.StatusBadRequest, errors.New("cookie too short (expected full Cookie header, ~hundreds of chars)"))
+		return
+	}
+	if err := s.setCookie(r.Context(), v); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"present": true, "length": len(v), "source": "meta"})
 }
 
 func (s *Server) handleAddProfile(w http.ResponseWriter, r *http.Request) {

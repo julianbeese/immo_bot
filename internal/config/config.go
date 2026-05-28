@@ -25,6 +25,7 @@ type Config struct {
 	Message    MessageConfig    `yaml:"message"`
 	QuietHours QuietHoursConfig `yaml:"quiet_hours"`
 	Web        WebConfig        `yaml:"web"`
+	Backup     BackupConfig     `yaml:"backup"`
 
 	// DefaultCampaign / Campaigns enable per-search-profile personalization:
 	// a search profile's category selects a campaign (message template, AI
@@ -40,6 +41,16 @@ type Campaign struct {
 	MessageTemplatePath string         `yaml:"message_template_path"`
 	AIPrompt            string         `yaml:"ai_prompt"`
 	Contact             ContactProfile `yaml:"contact_profile"`
+}
+
+// BackupConfig controls the periodic sqlite "VACUUM INTO" snapshot of the
+// listings/sent_messages database. Output files are atomic single-file copies;
+// retention is enforced by mtime.
+type BackupConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	Interval      time.Duration `yaml:"interval"`       // e.g. 24h
+	RetentionDays int           `yaml:"retention_days"` // 0 = keep newest only
+	Dir           string        `yaml:"dir"`            // e.g. "data/backups"
 }
 
 // WebConfig for the local web dashboard.
@@ -175,6 +186,12 @@ func DefaultConfig() *Config {
 			Enabled: false,
 			Addr:    "127.0.0.1:8080",
 		},
+		Backup: BackupConfig{
+			Enabled:       true,
+			Interval:      24 * time.Hour,
+			RetentionDays: 7,
+			Dir:           "data/backups",
+		},
 	}
 }
 
@@ -249,6 +266,25 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("DATABASE_PATH"); v != "" {
 		cfg.DatabasePath = v
 	}
+
+	if err := applyEnvBool("BACKUP_ENABLED", &cfg.Backup.Enabled); err != nil {
+		return nil, err
+	}
+	if v := os.Getenv("BACKUP_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("BACKUP_INTERVAL: %w", err)
+		}
+		cfg.Backup.Interval = d
+	}
+	if v := os.Getenv("BACKUP_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("BACKUP_RETENTION_DAYS: %w", err)
+		}
+		cfg.Backup.RetentionDays = n
+	}
+	applyEnvString("BACKUP_DIR", &cfg.Backup.Dir)
 
 	// Backward compatibility: with no campaigns configured, synthesize a single
 	// "default" campaign from the global message/contact settings so existing

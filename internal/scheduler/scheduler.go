@@ -19,6 +19,10 @@ import (
 type IS24Client interface {
 	Search(ctx context.Context, profile *domain.SearchProfile) ([]domain.Listing, error)
 	FetchExpose(ctx context.Context, is24ID string) (*domain.Listing, error)
+	// SetCookie applies a new IS24 session cookie at runtime so cookies can be
+	// rotated without restarting the bot. Implementations may return errors
+	// from updating their internal cookie jar.
+	SetCookie(cookie string) error
 }
 
 // Notifier sends notifications about listings and bot events. Implemented by
@@ -49,6 +53,9 @@ type Scheduler struct {
 	isAutoContactEnabled func() bool
 	isTestModeEnabled    func() bool
 	isQuietHoursEnabled  func() *bool // nil = use config, non-nil = override
+	// Returns true if the given time falls inside the active quiet-hours
+	// window. When nil, the scheduler falls back to cfg.IsWithinQuietHours.
+	isWithinQuietHours func(time.Time) bool
 
 	mu      sync.Mutex
 	running bool
@@ -130,6 +137,34 @@ func (s *Scheduler) SetTestModeCallback(fn func() bool) {
 // SetQuietHoursCallback sets the callback to check if quiet hours override is set
 func (s *Scheduler) SetQuietHoursCallback(fn func() *bool) {
 	s.isQuietHoursEnabled = fn
+}
+
+// SetQuietWindowCallback supplies an override for the active quiet-hours
+// window. When set, the scheduler uses it instead of cfg.IsWithinQuietHours so
+// the start/end times can be changed at runtime (e.g. via the dashboard).
+func (s *Scheduler) SetQuietWindowCallback(fn func(time.Time) bool) {
+	s.isWithinQuietHours = fn
+}
+
+// SetIS24Cookie hot-reloads the IS24 cookie: applies it to the client (so the
+// next scrape uses it), persists it to the meta table (so it survives
+// restarts), and clears the cookie-expired warning state. Safe to call from
+// any goroutine.
+func (s *Scheduler) SetIS24Cookie(ctx context.Context, cookie string) error {
+	if err := s.client.SetCookie(cookie); err != nil {
+		return fmt.Errorf("apply cookie to client: %w", err)
+	}
+	if err := s.repo.SetMeta(ctx, sqlite.MetaIS24Cookie, cookie); err != nil {
+		// Logged, not fatal — the in-memory cookie is already updated. Without
+		// persistence the bot still scrapes correctly until the next restart.
+		s.logger.Warn("failed to persist IS24 cookie override", "error", err)
+	}
+	s.mu.Lock()
+	s.emptyPolls = 0
+	s.cookieAlert = false
+	s.mu.Unlock()
+	s.logger.Info("IS24 cookie hot-reloaded", "length", len(cookie))
+	return nil
 }
 
 // GetStats returns current statistics
@@ -266,9 +301,16 @@ func (s *Scheduler) poll(ctx context.Context) error {
 }
 
 func (s *Scheduler) quietHoursActive() bool {
+	// Window: controller-supplied override if available, else cfg defaults.
+	inWindow := func() bool {
+		if s.isWithinQuietHours != nil {
+			return s.isWithinQuietHours(time.Now())
+		}
+		return s.cfg.IsWithinQuietHours()
+	}
 	quietOverride := s.isQuietHoursEnabled()
 	if quietOverride != nil {
-		return *quietOverride && s.cfg.IsWithinQuietHours()
+		return *quietOverride && inWindow()
 	}
 	return s.cfg.IsQuietTime()
 }

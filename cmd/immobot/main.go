@@ -17,6 +17,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/julianbeese/immo_bot/internal/antidetect"
+	"github.com/julianbeese/immo_bot/internal/backup"
 	"github.com/julianbeese/immo_bot/internal/config"
 	"github.com/julianbeese/immo_bot/internal/contact"
 	"github.com/julianbeese/immo_bot/internal/control"
@@ -103,6 +104,14 @@ func main() {
 	)
 	humanBehavior := antidetect.NewHumanBehavior(cfg.Contact.TypeDelay, cfg.Contact.ActionDelay)
 
+	// A previously hot-reloaded IS24 cookie (saved in the meta table via the
+	// dashboard / Telegram /cookie command) overrides the env-supplied one so
+	// the override survives container restarts without editing .env.
+	if v, _ := repo.GetMeta(context.Background(), sqlite.MetaIS24Cookie); v != "" {
+		cfg.IS24.Cookie = v
+		logger.Info("IS24 cookie loaded from meta override")
+	}
+
 	// Initialize IS24 browser client (uses chromedp to bypass WAF)
 	is24Client := is24.NewBrowserClient(cfg.IS24.Cookie, rateLimiter, cfg.Contact.ChromePath)
 	logger.Info("IS24 browser client initialized")
@@ -111,7 +120,14 @@ func main() {
 	filterEngine := filter.NewEngine()
 
 	// Shared, transport-neutral control state (contact mode, quiet hours).
-	ctrl := control.New()
+	// Defaults come from config.yaml; persisted overrides loaded from the
+	// sqlite meta table on construction.
+	ctrl := control.New(repo, logger, control.Defaults{
+		QuietHoursEnabled: cfg.QuietHours.Enabled,
+		QuietHoursStart:   cfg.QuietHours.Start,
+		QuietHoursEnd:     cfg.QuietHours.End,
+		Timezone:          cfg.QuietHours.Timezone,
+	})
 
 	// Initialize Telegram bot controller (for commands)
 	botController, err := telegram.NewBotController(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Telegram.Enabled, ctrl)
@@ -175,6 +191,12 @@ func main() {
 	sched.SetAutoContactCallback(ctrl.IsAutoContactEnabled)
 	sched.SetTestModeCallback(ctrl.IsTestModeEnabled)
 	sched.SetQuietHoursCallback(ctrl.IsQuietHoursEnabled)
+	// Quiet-hours WINDOW (start/end) override from controller — falls back to
+	// cfg defaults inside the controller when no override is persisted.
+	sched.SetQuietWindowCallback(ctrl.IsWithinQuietHours)
+
+	// /cookie chat command → scheduler hot-reload (also persists to meta).
+	ctrl.SetCookieCallback(sched.SetIS24Cookie)
 
 	// Set status/stats callbacks (text uses *bold* markup, rendered per channel)
 	ctrl.SetCallbacks(
@@ -285,7 +307,7 @@ func main() {
 
 	// Start web dashboard (localhost by default)
 	if cfg.Web.Enabled {
-		websrv := web.New(repo, ctrl, cfg, sched.GetStats, logger)
+		websrv := web.New(repo, ctrl, cfg, sched.GetStats, sched.SetIS24Cookie, logger)
 		go func() {
 			if err := websrv.Start(ctx, cfg.Web.Addr); err != nil {
 				logger.Error("web dashboard failed", "error", err)
@@ -349,6 +371,11 @@ func main() {
 		if err := sched.Start(ctx); err != nil {
 			logger.Error("scheduler failed to start", "error", err)
 			os.Exit(1)
+		}
+
+		// Periodic database snapshots (VACUUM INTO + retention rotation).
+		if cfg.Backup.Enabled {
+			go backup.Run(ctx, repo, cfg.Backup, logger)
 		}
 
 		// Wait for shutdown

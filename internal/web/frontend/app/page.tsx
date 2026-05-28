@@ -81,10 +81,18 @@ interface Overview {
   contact_mode: "off" | "test" | "on"
   contact_label: string
   quiet_hours: boolean
+  quiet_hours_start: string
+  quiet_hours_end: string
   last_poll: string
   default_campaign: string
   campaigns: string[]
   stats: Stats
+}
+
+interface CookieInfo {
+  present: boolean
+  length: number
+  source: "env" | "meta" | "none"
 }
 
 interface SearchProfile {
@@ -130,6 +138,11 @@ export default function DashboardPage() {
   // Editable buffers keyed by campaign name; populated from /api/campaigns.
   const [drafts, setDrafts] = React.useState<Record<string, { ai_prompt: string; template: string }>>({})
   const [savingCampaign, setSavingCampaign] = React.useState<string | null>(null)
+
+  // Cookie status (presence only — the cookie itself is never returned by the API).
+  const [cookieInfo, setCookieInfo] = React.useState<CookieInfo | null>(null)
+  const [cookieDraft, setCookieDraft] = React.useState("")
+  const [savingCookie, setSavingCookie] = React.useState(false)
   
   // UI states
   const [loading, setLoading] = React.useState(true)
@@ -171,6 +184,9 @@ export default function DashboardPage() {
 
       const cData: CampaignCfg[] = (await api("/api/campaigns")) || []
       setCampaigns(cData)
+
+      const ckData: CookieInfo = await api("/api/cookie")
+      setCookieInfo(ckData)
       // Only seed drafts the user hasn't started editing, so background polling
       // doesn't clobber in-progress edits.
       setDrafts(prev => {
@@ -202,7 +218,12 @@ export default function DashboardPage() {
   }, [loadData])
 
   // Set Settings (Auto Contact Mode / Quiet Hours)
-  const setSetting = async (body: { contact_mode?: string; quiet_hours?: boolean }) => {
+  const setSetting = async (body: {
+    contact_mode?: string
+    quiet_hours?: boolean
+    quiet_hours_start?: string
+    quiet_hours_end?: string
+  }) => {
     try {
       const oData = await api("/api/settings", {
         method: "POST",
@@ -240,6 +261,32 @@ export default function DashboardPage() {
       toast.error("Speichern fehlgeschlagen", { description: e.message })
     } finally {
       setSavingCampaign(null)
+    }
+  }
+
+  // Save the IS24 cookie (hot reload + persistence backend-side).
+  const saveCookie = async () => {
+    const v = cookieDraft.trim()
+    if (v.length < 50) {
+      toast.error("Cookie zu kurz", { description: "Bitte den vollständigen Cookie-Header einfügen." })
+      return
+    }
+    setSavingCookie(true)
+    try {
+      const updated: CookieInfo = await api("/api/cookie", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookie: v }),
+      })
+      setCookieInfo(updated)
+      setCookieDraft("")
+      toast.success("Cookie aktualisiert", {
+        description: "Nächster Poll-Zyklus nutzt den neuen Cookie. Kein Restart nötig.",
+      })
+    } catch (e: any) {
+      toast.error("Speichern fehlgeschlagen", { description: e.message })
+    } finally {
+      setSavingCookie(false)
     }
   }
 
@@ -528,23 +575,48 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* Quiet Hours Switch */}
-              <div className="flex items-center justify-between rounded-lg border p-3 bg-muted/10">
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-sm font-semibold">Ruhezeiten aktivieren</span>
-                  <span className="text-xs text-muted-foreground">Keine automatischen Bewerbungen nachts</span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted/30">
-                    {currentOverview.quiet_hours ? (
-                      <Moon className="h-4 w-4 text-indigo-500 fill-indigo-500/20" />
-                    ) : (
-                      <Sun className="h-4 w-4 text-amber-500" />
-                    )}
+              {/* Quiet Hours Switch + Window */}
+              <div className="space-y-2 rounded-lg border p-3 bg-muted/10">
+                <div className="flex items-center justify-between">
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-sm font-semibold">Ruhezeiten aktivieren</span>
+                    <span className="text-xs text-muted-foreground">Keine automatischen Bewerbungen nachts</span>
                   </div>
-                  <Switch
-                    checked={currentOverview.quiet_hours}
-                    onCheckedChange={(checked) => setSetting({ quiet_hours: checked })}
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted/30">
+                      {currentOverview.quiet_hours ? (
+                        <Moon className="h-4 w-4 text-indigo-500 fill-indigo-500/20" />
+                      ) : (
+                        <Sun className="h-4 w-4 text-amber-500" />
+                      )}
+                    </div>
+                    <Switch
+                      checked={currentOverview.quiet_hours}
+                      onCheckedChange={(checked) => setSetting({ quiet_hours: checked })}
+                    />
+                  </div>
+                </div>
+                {/* Window pickers — onBlur saves so users can tab between fields without intermediate POSTs. */}
+                <div className="flex items-center gap-2 pt-2 border-t border-border/40">
+                  <span className="text-xs text-muted-foreground">Fenster:</span>
+                  <Input
+                    type="time"
+                    value={currentOverview.quiet_hours_start}
+                    onChange={(e) =>
+                      setOverview(prev => prev ? { ...prev, quiet_hours_start: e.target.value } : prev)
+                    }
+                    onBlur={(e) => setSetting({ quiet_hours_start: e.target.value })}
+                    className="h-8 w-[110px] font-mono text-xs"
+                  />
+                  <span className="text-xs text-muted-foreground">–</span>
+                  <Input
+                    type="time"
+                    value={currentOverview.quiet_hours_end}
+                    onChange={(e) =>
+                      setOverview(prev => prev ? { ...prev, quiet_hours_end: e.target.value } : prev)
+                    }
+                    onBlur={(e) => setSetting({ quiet_hours_end: e.target.value })}
+                    className="h-8 w-[110px] font-mono text-xs"
                   />
                 </div>
               </div>
@@ -587,6 +659,56 @@ export default function DashboardPage() {
             </Card>
           </div>
         </div>
+
+        {/* IS24 Cookie Card — hot reload without restart */}
+        <Card className="shadow-sm border border-border/60">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-md font-bold tracking-tight">IS24-Cookie</CardTitle>
+                <CardDescription className="text-xs">
+                  Aktualisieren ohne Restart. Cookie aus DevTools → www.immobilienscout24.de → alle als <code className="rounded bg-muted px-1 py-0.5 text-[10px]">name=val; name=val</code> kopieren.
+                </CardDescription>
+              </div>
+              {cookieInfo && (
+                <Badge
+                  variant="outline"
+                  className={`text-[10px] ${
+                    cookieInfo.source === "meta"
+                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 border-emerald-500/20"
+                      : cookieInfo.source === "env"
+                      ? "bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20"
+                      : "bg-destructive/10 text-destructive border-destructive/20"
+                  }`}
+                >
+                  {cookieInfo.source === "meta"
+                    ? `Override aktiv (${cookieInfo.length} Z.)`
+                    : cookieInfo.source === "env"
+                    ? `Aus .env (${cookieInfo.length} Z.)`
+                    : "Kein Cookie gesetzt"}
+                </Badge>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="flex gap-2">
+              <textarea
+                rows={3}
+                value={cookieDraft}
+                onChange={(e) => setCookieDraft(e.target.value)}
+                placeholder="name1=value1; name2=value2; …"
+                className="flex-1 rounded-md border border-input bg-transparent px-3 py-2 text-xs font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
+              />
+              <Button
+                onClick={saveCookie}
+                disabled={savingCookie || cookieDraft.trim().length < 50}
+                className="h-auto self-stretch px-4 font-semibold"
+              >
+                {savingCookie ? "Speichert…" : "Übernehmen"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Search Profiles Card */}
         <Card className="shadow-sm border border-border/60">

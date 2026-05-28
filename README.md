@@ -4,11 +4,6 @@ Automatisierter ImmobilienScout24-Wohnungsbot in Go. Pollt IS24-Suchen, filtert,
 Inserate per **Telegram** und/oder **WhatsApp** und kann Vermieter optional automatisch über das
 IS24-Kontaktformular anschreiben — gesteuert per Chat-Befehl.
 
-> ⚠️ **Disclaimer.** Der Bot umgeht IS24-Bot-Schutz und sendet automatisiert Kontaktanfragen. Das
-> verstößt vermutlich gegen die IS24-Nutzungsbedingungen, die WhatsApp-Kopplung kann zur Sperrung
-> des WhatsApp-Kontos führen, und das Versenden personenbezogener Daten unterliegt der DSGVO.
-> Nutzung auf eigenes Risiko. Starte im Test-Modus, bevor du live gehst.
-
 ## Features
 
 - Mehrere Suchprofile parallel (z.B. *Einzelwohnung* + *WG*)

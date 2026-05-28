@@ -29,8 +29,20 @@ import {
   Save,
   RotateCcw,
   Sparkles,
-  FileText
+  FileText,
+  LayoutDashboard,
+  Cookie as CookieIcon
 } from "lucide-react"
+
+type View = "overview" | "settings" | "profiles" | "templates" | "listings"
+
+const VIEWS: { key: View; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { key: "overview",  label: "Übersicht",         icon: LayoutDashboard },
+  { key: "settings",  label: "Einstellungen",     icon: Settings },
+  { key: "profiles",  label: "Suchprofile",       icon: Building },
+  { key: "templates", label: "Nachrichten",       icon: Wand2 },
+  { key: "listings",  label: "Wohnungen",         icon: Home },
+]
 
 import { Button } from "@/components/ui/button"
 import {
@@ -127,6 +139,16 @@ interface Listing {
   created_at: string
 }
 
+function sectionSubtitle(view: View, o: Overview): string {
+  switch (view) {
+    case "overview":  return `${o.stats.total} Wohnungen gefunden, ${o.stats.notified} benachrichtigt, ${o.stats.contacted} kontaktiert.`
+    case "settings":  return "Kontakt-Modus, Ruhezeiten und IS24-Cookie."
+    case "profiles":  return "IS24-Suchen, die der Bot zyklisch abfragt."
+    case "templates": return "AI-Prompt und Nachrichten-Template pro Kampagne."
+    case "listings":  return "Gefundene Wohnungen aller Profile."
+  }
+}
+
 export default function DashboardPage() {
   const { resolvedTheme, setTheme } = useTheme()
   
@@ -143,6 +165,9 @@ export default function DashboardPage() {
   const [cookieInfo, setCookieInfo] = React.useState<CookieInfo | null>(null)
   const [cookieDraft, setCookieDraft] = React.useState("")
   const [savingCookie, setSavingCookie] = React.useState(false)
+
+  // Active section selected via the sidebar.
+  const [view, setView] = React.useState<View>("overview")
   
   // UI states
   const [loading, setLoading] = React.useState(true)
@@ -437,78 +462,139 @@ export default function DashboardPage() {
   const currentOverview = overview!
 
   return (
-    <div className="min-h-screen bg-background text-foreground transition-colors duration-300 antialiased font-sans">
+    <div className="min-h-screen bg-background text-foreground transition-colors duration-300 antialiased font-sans flex">
       <Toaster position="bottom-right" />
-      
-      {/* Top Header */}
-      <header className="sticky top-0 z-40 w-full border-b bg-background/95 backdrop-blur-md">
-        <div className="container mx-auto flex h-16 max-w-[1440px] items-center justify-between px-4 sm:px-6 md:px-8">
-          <div className="flex items-center gap-2.5">
-            <div>
-              <h1 className="text-lg font-bold tracking-tight">svensk</h1>
-            </div>
-          </div>
 
-          <div className="flex items-center gap-3">
-            <Badge
-              variant="outline"
-              className={`hidden gap-1.5 py-1 px-2.5 text-xs font-semibold sm:flex transition-all duration-300 ${
-                currentOverview.contact_mode === "on"
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500"
-                  : currentOverview.contact_mode === "test"
-                  ? "border-amber-500/30 bg-amber-500/10 text-amber-500"
-                  : "border-muted/50 bg-muted/20 text-muted-foreground"
-              }`}
-            >
-              <span className={`h-1.5 w-1.5 rounded-full ${
+      {/* Sidebar */}
+      <aside className="hidden md:flex md:w-56 lg:w-60 shrink-0 flex-col border-r bg-muted/10 sticky top-0 h-screen">
+        <div className="px-5 pt-5 pb-3 border-b">
+          <h1 className="text-lg font-bold tracking-tight">svensk</h1>
+          <p className="text-[10px] text-muted-foreground mt-0.5">ImmoBot Dashboard</p>
+        </div>
+
+        <nav className="flex-1 px-2 py-3 space-y-1">
+          {VIEWS.map(v => {
+            const Icon = v.icon
+            const active = view === v.key
+            return (
+              <button
+                key={v.key}
+                onClick={() => setView(v.key)}
+                className={`w-full flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                  active
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                }`}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                {v.label}
+              </button>
+            )
+          })}
+        </nav>
+
+        {/* Sidebar footer: status + last poll + theme/refresh */}
+        <div className="px-3 py-3 border-t space-y-3">
+          <div
+            className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-semibold ${
+              currentOverview.contact_mode === "on"
+                ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20"
+                : currentOverview.contact_mode === "test"
+                ? "bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                : "bg-muted/30 text-muted-foreground border border-muted/40"
+            }`}
+            title={currentOverview.contact_label}
+          >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
                 currentOverview.contact_mode === "on"
                   ? "bg-emerald-500 animate-ping"
                   : currentOverview.contact_mode === "test"
                   ? "bg-amber-500 animate-pulse"
                   : "bg-muted-foreground"
-              }`} />
-              {currentOverview.contact_label} {currentOverview.quiet_hours ? "· 🌙 Ruhezeit" : "· ☀️ 24/7"}
-            </Badge>
-
-            <span className="hidden text-xs text-muted-foreground md:inline">
-              {currentOverview.last_poll ? (
-                <>letzter Poll: <span className="font-semibold text-foreground">{formatDate(currentOverview.last_poll)}</span></>
-              ) : (
-                "noch kein Poll"
-              )}
-            </span>
-
+              }`}
+            />
+            <span className="truncate">{currentOverview.contact_label}</span>
+          </div>
+          <div className="text-[10px] text-muted-foreground px-1">
+            {currentOverview.last_poll ? (
+              <>
+                letzter Poll
+                <br />
+                <span className="font-semibold text-foreground">
+                  {formatDate(currentOverview.last_poll)}
+                </span>
+              </>
+            ) : (
+              "noch kein Poll"
+            )}
+          </div>
+          <div className="flex items-center gap-2">
             <Button
               variant="ghost"
               size="icon"
-              className="h-9 w-9"
+              className="h-8 w-8"
               onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-              title="Design umschalten (Taste 'D')"
+              title="Design umschalten"
             >
               {resolvedTheme === "dark" ? (
-                <Sun className="h-[1.2rem] w-[1.2rem] text-amber-500 transition-all" />
+                <Sun className="h-4 w-4 text-amber-500" />
               ) : (
-                <Moon className="h-[1.2rem] w-[1.2rem] text-primary transition-all" />
+                <Moon className="h-4 w-4 text-primary" />
               )}
-              <span className="sr-only">Design umschalten</span>
             </Button>
-
             <Button
               variant="outline"
               size="icon"
-              className={`h-9 w-9 transition-transform duration-300 ${refreshing ? "rotate-180" : ""}`}
+              className={`h-8 w-8 transition-transform duration-300 ${refreshing ? "rotate-180" : ""}`}
               onClick={() => loadData(true)}
               disabled={refreshing}
+              title="Aktualisieren"
             >
               <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
             </Button>
           </div>
         </div>
-      </header>
+      </aside>
 
-      {/* Main Body */}
-      <main className="container mx-auto max-w-[1440px] p-4 sm:p-6 md:p-8 space-y-6">
-        
+      {/* Mobile top bar with nav select + actions */}
+      <div className="md:hidden fixed top-0 inset-x-0 z-40 border-b bg-background/95 backdrop-blur-md">
+        <div className="flex items-center justify-between gap-2 px-4 py-2">
+          <h1 className="text-base font-bold tracking-tight">svensk</h1>
+          <Select value={view} onValueChange={(v) => setView(v as View)}>
+            <SelectTrigger className="h-8 w-[170px] text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {VIEWS.map(v => (
+                <SelectItem key={v.key} value={v.key}>{v.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="icon" className="h-8 w-8"
+              onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}>
+              {resolvedTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </Button>
+            <Button variant="outline" size="icon" className="h-8 w-8"
+              onClick={() => loadData(true)} disabled={refreshing}>
+              <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Main content area — only the active section is rendered. */}
+      <main className="flex-1 min-w-0 p-4 sm:p-6 md:p-8 space-y-6 mt-12 md:mt-0">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold tracking-tight">
+              {VIEWS.find(v => v.key === view)?.label}
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {sectionSubtitle(view, currentOverview)}
+            </p>
+          </div>
+        </div>
+
         {error && (
           <div className="flex items-center gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">
             <ShieldAlert className="h-5 w-5 shrink-0" />
@@ -527,10 +613,9 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Global Settings & Stats Grid */}
-        <div className="grid gap-6 md:grid-cols-12">
-          {/* Settings Box */}
-          <Card className="md:col-span-5 shadow-sm border border-border/60 hover:border-border transition-all duration-300">
+        {/* Settings view: full-width settings card. */}
+        {view === "settings" && (
+          <Card className="shadow-sm border border-border/60 hover:border-border transition-all duration-300">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
                 <Settings className="h-4 w-4" /> Einstellungen
@@ -622,9 +707,64 @@ export default function DashboardPage() {
               </div>
             </CardContent>
           </Card>
+        )}
 
-          {/* Stats Cards Box */}
-          <div className="md:col-span-7 grid grid-cols-3 gap-4">
+        {/* Overview view: quick status + stats grid. */}
+        {view === "overview" && (
+        <>
+          <Card className="shadow-sm border border-border/60">
+            <CardContent className="pt-5 pb-5">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Modus</span>
+                  <Badge
+                    variant="outline"
+                    className={`text-xs px-2.5 py-1 ${
+                      currentOverview.contact_mode === "on"
+                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 border-emerald-500/20"
+                        : currentOverview.contact_mode === "test"
+                        ? "bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20"
+                        : "bg-muted/30 text-muted-foreground"
+                    }`}
+                  >
+                    {currentOverview.contact_label}
+                  </Badge>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Ruhezeit</span>
+                  {currentOverview.quiet_hours ? (
+                    <Badge variant="outline" className="text-xs bg-indigo-500/10 text-indigo-500 border-indigo-500/20">
+                      🌙 {currentOverview.quiet_hours_start}–{currentOverview.quiet_hours_end}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-xs bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20">
+                      ☀️ 24/7
+                    </Badge>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Cookie</span>
+                  {cookieInfo?.source === "meta" ? (
+                    <Badge variant="outline" className="text-xs bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 border-emerald-500/20">Override · {cookieInfo.length} Z.</Badge>
+                  ) : cookieInfo?.source === "env" ? (
+                    <Badge variant="outline" className="text-xs bg-amber-500/10 text-amber-600 dark:text-amber-500 border-amber-500/20">.env · {cookieInfo.length} Z.</Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-xs bg-destructive/10 text-destructive border-destructive/20">nicht gesetzt</Badge>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 ml-auto">
+                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setView("settings")}>
+                    Einstellungen
+                  </Button>
+                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setView("profiles")}>
+                    Suchprofile
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {/* Stat Total */}
             <Card className="flex flex-col justify-between overflow-hidden shadow-sm border border-border/60 hover:border-border transition-all duration-300">
               <CardHeader className="pb-2">
@@ -658,14 +798,18 @@ export default function DashboardPage() {
               <div className="h-1.5 w-full bg-emerald-500/20" />
             </Card>
           </div>
-        </div>
+        </>
+        )}
 
-        {/* IS24 Cookie Card — hot reload without restart */}
+        {/* Cookie card — part of Einstellungen. */}
+        {view === "settings" && (
         <Card className="shadow-sm border border-border/60">
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <div>
-                <CardTitle className="text-md font-bold tracking-tight">IS24-Cookie</CardTitle>
+                <CardTitle className="text-md font-bold tracking-tight flex items-center gap-2">
+                  <CookieIcon className="h-4 w-4" /> IS24-Cookie
+                </CardTitle>
                 <CardDescription className="text-xs">
                   Aktualisieren ohne Restart. Cookie aus DevTools → www.immobilienscout24.de → alle als <code className="rounded bg-muted px-1 py-0.5 text-[10px]">name=val; name=val</code> kopieren.
                 </CardDescription>
@@ -709,8 +853,9 @@ export default function DashboardPage() {
             </div>
           </CardContent>
         </Card>
+        )}
 
-        {/* Search Profiles Card */}
+        {view === "profiles" && (
         <Card className="shadow-sm border border-border/60">
           <CardHeader className="flex flex-row items-center justify-between pb-4">
             <div>
@@ -879,8 +1024,9 @@ export default function DashboardPage() {
             </div>
           </CardContent>
         </Card>
+        )}
 
-        {/* Message Templates / AI Prompt Editor */}
+        {view === "templates" && (
         <Card className="shadow-sm border border-border/60">
           <CardHeader className="pb-4">
             <CardTitle className="text-md font-bold tracking-tight flex items-center gap-2">
@@ -977,8 +1123,9 @@ export default function DashboardPage() {
             })}
           </CardContent>
         </Card>
+        )}
 
-        {/* Listings / Apartments Card */}
+        {view === "listings" && (
         <Card className="shadow-sm border border-border/60">
           <CardHeader className="flex flex-row items-center justify-between pb-4">
             <div>
@@ -1086,9 +1233,8 @@ export default function DashboardPage() {
             </div>
           </CardContent>
         </Card>
+        )}
       </main>
-
-
     </div>
   )
 }

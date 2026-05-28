@@ -74,12 +74,45 @@ default_campaign: "single"
 campaigns:
   single:
     message_template_path: "configs/message_single.txt"
-    ai_prompt: "Du schreibst für ein berufstätiges Paar, das langfristig eine gemeinsame Wohnung sucht. 1-2 authentische, enthusiastische Sätze über konkrete Details des Inserats. Keine Besichtigung erwähnen, keine Anrede/Grußformel."
+    ai_prompt: |
+      Du schreibst für Julian, einen Forward Deployed Engineer (Software) bei
+      einem Startup mit Büro in München-Schwabing. Er arbeitet viel und sucht
+      ein Zuhause, in dem er gut entspannen kann.
+
+      Schreibe 2–3 authentische Sätze aus der Ich-Perspektive, die KONKRETE,
+      sichtbare Details aus dem Inserat aufgreifen — z. B. Bodenbelag (Parkett,
+      Dielen, Fliesen), Lichteinfall, Grundriss, Balkon/Terrasse, Küche, Bad,
+      Lage/Viertel, Ausstattung. Nimm mindestens ein konkretes Detail aus dem
+      übergebenen Beschreibungstext auf, statt allgemein zu bleiben.
+
+      Tonalität: warm, persönlich, ohne Floskeln; nicht werblich.
+
+      WICHTIG: keine Anrede, keine Grußformel, keine Erwähnung von Besichtigung
+      oder Selbstauskunft — das steht im Rahmen-Anschreiben. Gib NUR die 2–3
+      Sätze zurück, ohne Anführungszeichen, ohne Aufzählung.
     # contact_profile leer = globales contact.profile. Für abweichende
     # Bewerberdaten das Profil KOMPLETT ausfüllen (sonst greift das globale).
   wg:
     message_template_path: "configs/message_wg.txt"
-    ai_prompt: "Du schreibst für jemanden, der eine größere Wohnung zur Gründung einer 3er-WG sucht. 1-2 authentische Sätze über konkrete Details des Inserats, betone Eignung für eine WG (Raumaufteilung, Größe). Keine Besichtigung erwähnen, keine Anrede/Grußformel."
+    ai_prompt: |
+      Du schreibst für eine 2er-WG aus Julian (Forward Deployed Engineer,
+      Software, Startup in München-Schwabing) und Anna Neske (steigt im
+      Oktober bei McKinsey in München ein). Beide kennen sich aus dem Master,
+      ziehen erstmals zusammen und suchen ein Zuhause, in dem sie sich
+      schnell wohlfühlen.
+
+      Schreibe 2–3 authentische Sätze aus der Wir-Perspektive, die KONKRETE,
+      sichtbare Details aus dem Inserat aufgreifen — besonders Aspekte, die
+      eine WG glücklich machen: getrennte Schlafzimmer, Größenverhältnis der
+      Zimmer, gemeinsamer Wohn-/Essbereich, Küche, Bad-Situation, Balkon,
+      Lage/Viertel. Nimm mindestens ein konkretes Detail aus dem
+      Beschreibungstext auf.
+
+      Tonalität: warm, persönlich, ohne Floskeln; nicht werblich.
+
+      WICHTIG: keine Anrede, keine Grußformel, keine Erwähnung von Besichtigung
+      oder Selbstauskunft — das steht im Rahmen-Anschreiben. Gib NUR die 2–3
+      Sätze zurück, ohne Anführungszeichen, ohne Aufzählung.
     # contact_profile:
     #   salutation: MALE
     #   first_name: Julian

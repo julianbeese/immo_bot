@@ -1,11 +1,12 @@
-Sehr geehrte Damen und Herren,
+Hallo zusammen,
 
-ich interessiere mich sehr für Ihre angebotene Wohnung "{{.Title}}".
+ich habe gerade Ihr Inserat „{{.Title}}"{{if .District}} in {{.District}}{{end}} entdeckt und großes Interesse an der Wohnung.
+
+Kurz zu mir: Ich arbeite als Forward Deployed Engineer (Software) bei einem Startup mit Büro in München-Schwabing. Die Tage sind oft lang und intensiv, umso wichtiger ist mir ein Zuhause, in dem ich nach der Arbeit gut runterkommen kann.
 
 {{.PersonalizedDetails}}
 
-Meine Selbstauskunft, Bonitätsbescheinigung und weitere Unterlagen stelle ich Ihnen gerne bereit.
+Über die Möglichkeit zu einer Besichtigung würde ich mich sehr freuen.
 
-Vielen Dank für Ihre Zeit.
-
-Beste Grüße
+Viele Grüße
+Julian Beese

@@ -65,7 +65,8 @@ func (c *BrowserClient) Search(ctx context.Context, profile *domain.SearchProfil
 
 		// Debug: save HTML to file
 		if c.debug {
-			os.WriteFile(fmt.Sprintf("/tmp/is24_search_page%d.html", page), []byte(html), 0644)
+			_ = os.MkdirAll("data/debug", 0o755)
+			os.WriteFile(fmt.Sprintf("data/debug/is24_search_page%d.html", page), []byte(html), 0o644)
 		}
 
 		listings, err := c.parser.ParseSearchResults([]byte(html))
@@ -121,6 +122,11 @@ func (c *BrowserClient) FetchExpose(ctx context.Context, is24ID string) (*domain
 	html, err := c.fetchPage(ctx, exposeURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch expose: %w", err)
+	}
+
+	if c.debug {
+		_ = os.MkdirAll("data/debug", 0o755)
+		_ = os.WriteFile(fmt.Sprintf("data/debug/is24_expose_%s.html", is24ID), []byte(html), 0o644)
 	}
 
 	return c.parser.ParseExpose([]byte(html), is24ID)

@@ -1,15 +1,12 @@
-Sehr geehrte Damen und Herren,
+Hallo zusammen,
 
-ich interessiere mich sehr für Ihre angebotene Wohnung "{{.Title}}".
+wir haben gerade Ihr Inserat „{{.Title}}"{{if .District}} in {{.District}}{{end}} entdeckt und großes Interesse an der Wohnung — als 2er-WG.
+
+Kurz zu uns: Ich (Julian) arbeite als Forward Deployed Engineer (Software) bei einem Startup in München-Schwabing. Anna Neske, eine Freundin aus meinem Master, beginnt im Oktober bei McKinsey in München. Wir kennen uns seit Jahren und suchen ein Zuhause, in dem wir uns schnell wohlfühlen können.
 
 {{.PersonalizedDetails}}
 
-Ich suche eine größere Wohnung, um mit zwei Mitbewohner:innen eine ruhige, langfristige Wohngemeinschaft zu gründen. Wir sind alle berufstätig und legen großen Wert auf ein gepflegtes, verlässliches Mietverhältnis.
+Über die Möglichkeit zu einer Besichtigung würden wir uns sehr freuen.
 
-Unsere Selbstauskünfte und Bonitätsnachweise stellen wir selbstverständlich gerne bereit.
-
-Über eine Einladung zur Besichtigung würden wir uns sehr freuen.
-
-Vielen Dank für Ihre Zeit.
-
-Beste Grüße
+Viele Grüße
+Julian Beese & Anna Neske

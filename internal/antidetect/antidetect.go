@@ -118,10 +118,18 @@ func defaultUserAgents() []string {
 	}
 }
 
-// HumanBehavior provides human-like delays for browser automation
+// HumanBehavior provides human-like delays for browser automation.
+//
+// TypeDelay/ActionDelay are the static fallbacks used when no live provider
+// is registered. If TypeDelayFn / ActionDelayFn is set (dashboard wires these
+// to the Controller), each call reads the current value — so changes from the
+// UI take effect on the next keystroke / next action without restart.
 type HumanBehavior struct {
 	TypeDelay   time.Duration
 	ActionDelay time.Duration
+
+	TypeDelayFn   func() time.Duration
+	ActionDelayFn func() time.Duration
 }
 
 // NewHumanBehavior creates a new human behavior simulator
@@ -132,18 +140,44 @@ func NewHumanBehavior(typeDelay, actionDelay time.Duration) *HumanBehavior {
 	}
 }
 
+func (h *HumanBehavior) typeDelay() time.Duration {
+	if h.TypeDelayFn != nil {
+		if d := h.TypeDelayFn(); d > 0 {
+			return d
+		}
+	}
+	return h.TypeDelay
+}
+
+func (h *HumanBehavior) actionDelay() time.Duration {
+	if h.ActionDelayFn != nil {
+		if d := h.ActionDelayFn(); d > 0 {
+			return d
+		}
+	}
+	return h.ActionDelay
+}
+
 // TypeChar returns a delay for typing a character (with variation)
 func (h *HumanBehavior) TypeChar() time.Duration {
+	d := h.typeDelay()
+	if d <= 0 {
+		return 0
+	}
 	// Add 0-50% variation
-	variation := time.Duration(rand.Int63n(int64(h.TypeDelay / 2)))
-	return h.TypeDelay + variation
+	variation := time.Duration(rand.Int63n(int64(d/2) + 1))
+	return d + variation
 }
 
 // ActionPause returns a delay between actions
 func (h *HumanBehavior) ActionPause() time.Duration {
+	d := h.actionDelay()
+	if d <= 0 {
+		return 0
+	}
 	// Add 0-100% variation
-	variation := time.Duration(rand.Int63n(int64(h.ActionDelay)))
-	return h.ActionDelay + variation
+	variation := time.Duration(rand.Int63n(int64(d) + 1))
+	return d + variation
 }
 
 // ScrollPause returns a delay for scrolling

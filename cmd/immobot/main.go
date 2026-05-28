@@ -103,6 +103,8 @@ func main() {
 		cfg.IS24.MaxDelay,
 	)
 	humanBehavior := antidetect.NewHumanBehavior(cfg.Contact.TypeDelay, cfg.Contact.ActionDelay)
+	// Wired below once the Controller exists, so dashboard timing edits take
+	// effect on the next keystroke / next action without restart.
 
 	// A previously hot-reloaded IS24 cookie (saved in the meta table via the
 	// dashboard / Telegram /cookie command) overrides the env-supplied one so
@@ -123,11 +125,22 @@ func main() {
 	// Defaults come from config.yaml; persisted overrides loaded from the
 	// sqlite meta table on construction.
 	ctrl := control.New(repo, logger, control.Defaults{
-		QuietHoursEnabled: cfg.QuietHours.Enabled,
-		QuietHoursStart:   cfg.QuietHours.Start,
-		QuietHoursEnd:     cfg.QuietHours.End,
-		Timezone:          cfg.QuietHours.Timezone,
+		QuietHoursEnabled:  cfg.QuietHours.Enabled,
+		QuietHoursStart:    cfg.QuietHours.Start,
+		QuietHoursEnd:      cfg.QuietHours.End,
+		Timezone:           cfg.QuietHours.Timezone,
+		PollInterval:       cfg.PollInterval,
+		ContactTypeDelay:   cfg.Contact.TypeDelay,
+		ContactActionDelay: cfg.Contact.ActionDelay,
 	})
+
+	// Live timing: behavior reads delays from the Controller so dashboard
+	// edits take effect on the next keystroke / next action.
+	humanBehavior.TypeDelayFn = ctrl.GetContactTypeDelay
+	humanBehavior.ActionDelayFn = ctrl.GetContactActionDelay
+
+	// Filter reads furnished-exclusion flag from controller (dashboard toggle).
+	filterEngine.ExcludeFurnishedFn = ctrl.IsExcludeFurnishedEnabled
 
 	// Initialize Telegram bot controller (for commands)
 	botController, err := telegram.NewBotController(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Telegram.Enabled, ctrl)
@@ -194,6 +207,12 @@ func main() {
 	// Quiet-hours WINDOW (start/end) override from controller — falls back to
 	// cfg defaults inside the controller when no override is persisted.
 	sched.SetQuietWindowCallback(ctrl.IsWithinQuietHours)
+
+	// Dynamic poll interval: scheduler reads the latest value each cycle and
+	// the buffered reset channel cuts the current sleep short on change.
+	pollResetCh := make(chan struct{}, 1)
+	ctrl.SubscribePollInterval(pollResetCh)
+	sched.SetPollIntervalSource(ctrl.GetPollInterval, pollResetCh)
 
 	// /cookie chat command → scheduler hot-reload (also persists to meta).
 	ctrl.SetCookieCallback(sched.SetIS24Cookie)

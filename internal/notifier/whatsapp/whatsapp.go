@@ -277,6 +277,9 @@ func formatListing(l *domain.Listing) string {
 		}
 		sb.WriteString("\n")
 	}
+	if l.ContactPerson != "" {
+		sb.WriteString(fmt.Sprintf("📇 %s\n", l.ContactPerson))
+	}
 
 	if l.URL != "" {
 		sb.WriteString(fmt.Sprintf("\n🔗 %s", l.URL))

@@ -1,4 +1,4 @@
-Sehr geehrte Damen und Herren,
+{{.Salutation}}
 
 ich interessiere mich sehr für Ihre angebotene Wohnung "{{.Title}}".
 

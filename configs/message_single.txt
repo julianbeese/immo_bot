@@ -1,4 +1,4 @@
-Hallo zusammen,
+{{.Salutation}}
 
 ich habe gerade Ihr Inserat „{{.Title}}"{{if .District}} in {{.District}}{{end}} entdeckt und großes Interesse an der Wohnung.
 

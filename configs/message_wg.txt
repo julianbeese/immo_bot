@@ -1,4 +1,4 @@
-Hallo zusammen,
+{{.Salutation}}
 
 wir haben gerade Ihr Inserat „{{.Title}}"{{if .District}} in {{.District}}{{end}} entdeckt und großes Interesse an der Wohnung — als 2er-WG.
 

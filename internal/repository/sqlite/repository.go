@@ -367,14 +367,16 @@ func (r *Repository) CreateListing(ctx context.Context, l *domain.Listing) error
 			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
 			has_elevator, pets_allowed, build_year, available_from,
 			description, landlord_name, landlord_type, image_urls,
-			contact_form_url, search_profile_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			contact_form_url, search_profile_id, contact_person,
+			contact_salutation
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		l.IS24ID, l.Title, l.URL, l.Address, l.City, l.District, l.PostalCode,
 		l.Price, l.PricePerSqm, l.Rooms, l.Area, l.HasBalcony, l.HasEBK,
 		l.HasElevator, nullableBool(l.PetsAllowed), nullableInt(l.BuildYear),
 		l.AvailableFrom, l.Description, l.LandlordName, l.LandlordType,
 		string(imageURLs), l.ContactFormURL, l.SearchProfileID,
+		nullableString(l.ContactPerson), nullableString(l.ContactSalutation),
 	)
 	if err != nil {
 		return err
@@ -398,12 +400,14 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 	var imageURLs sql.NullString
 	var petsAllowed sql.NullBool
 
+	var contactPerson, contactSalutation sql.NullString
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id, is24_id, title, url, address, city, district, postal_code,
 			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
 			has_elevator, pets_allowed, build_year, available_from,
 			description, landlord_name, landlord_type, image_urls,
 			contact_form_url, search_profile_id, contacted, notified,
+			contact_person, contact_salutation,
 			created_at, updated_at
 		FROM listings WHERE is24_id = ?
 	`, is24ID).Scan(
@@ -412,7 +416,8 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 		&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &l.BuildYear,
 		&l.AvailableFrom, &l.Description, &l.LandlordName, &l.LandlordType,
 		&imageURLs, &l.ContactFormURL, &l.SearchProfileID, &l.Contacted,
-		&l.Notified, &l.CreatedAt, &l.UpdatedAt,
+		&l.Notified, &contactPerson, &contactSalutation,
+		&l.CreatedAt, &l.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -425,6 +430,8 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 		json.Unmarshal([]byte(imageURLs.String), &l.ImageURLs)
 	}
 	l.PetsAllowed = nullBoolPtr(petsAllowed)
+	l.ContactPerson = contactPerson.String
+	l.ContactSalutation = contactSalutation.String
 	return &l, nil
 }
 
@@ -467,6 +474,7 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 			has_elevator, pets_allowed, build_year, available_from,
 			description, landlord_name, landlord_type, image_urls,
 			contact_form_url, search_profile_id, contacted, notified,
+			contact_person, contact_salutation,
 			created_at, updated_at
 		FROM listings WHERE %s ORDER BY created_at DESC %s
 	`, condition, suffix))
@@ -480,6 +488,7 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 		var l domain.Listing
 		var imageURLs, address, city, district, postalCode, availableFrom, description sql.NullString
 		var landlordName, landlordType, contactFormURL sql.NullString
+		var contactPerson, contactSalutation sql.NullString
 		var petsAllowed sql.NullBool
 		var buildYear sql.NullInt64
 		var pricePerSqm sql.NullFloat64
@@ -490,7 +499,8 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 			&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &buildYear,
 			&availableFrom, &description, &landlordName, &landlordType,
 			&imageURLs, &contactFormURL, &l.SearchProfileID, &l.Contacted,
-			&l.Notified, &l.CreatedAt, &l.UpdatedAt,
+			&l.Notified, &contactPerson, &contactSalutation,
+			&l.CreatedAt, &l.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -506,6 +516,8 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 		l.Description = description.String
 		l.LandlordName = landlordName.String
 		l.LandlordType = landlordType.String
+		l.ContactPerson = contactPerson.String
+		l.ContactSalutation = contactSalutation.String
 		l.ContactFormURL = contactFormURL.String
 		if imageURLs.Valid {
 			json.Unmarshal([]byte(imageURLs.String), &l.ImageURLs)
@@ -514,6 +526,18 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 		listings = append(listings, l)
 	}
 	return listings, rows.Err()
+}
+
+// UpdateListingContact persists the Ansprechpartner name and cached gender
+// classification (SalutationMale / Female / Unknown) so the gender lookup runs
+// at most once per listing.
+func (r *Repository) UpdateListingContact(ctx context.Context, id int64, person, salutation string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE listings
+		SET contact_person = ?, contact_salutation = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, nullableString(person), nullableString(salutation), id)
+	return err
 }
 
 // MarkListingNotified marks a listing as notified

@@ -94,6 +94,12 @@ interface Stats {
   contacted: number
 }
 
+interface TimingRanges {
+  poll_interval_seconds: { min: number; max: number }
+  contact_type_delay_ms: { min: number; max: number }
+  contact_action_delay_ms: { min: number; max: number }
+}
+
 interface Overview {
   contact_mode: "off" | "test" | "on"
   contact_label: string
@@ -104,6 +110,11 @@ interface Overview {
   default_campaign: string
   campaigns: string[]
   stats: Stats
+  poll_interval_seconds: number
+  contact_type_delay_ms: number
+  contact_action_delay_ms: number
+  timing_ranges: TimingRanges
+  exclude_furnished: boolean
 }
 
 interface CookieInfo {
@@ -154,6 +165,15 @@ const EMPTY_OVERVIEW: Overview = {
   default_campaign: "",
   campaigns: [],
   stats: { total: 0, notified: 0, contacted: 0 },
+  poll_interval_seconds: 300,
+  contact_type_delay_ms: 50,
+  contact_action_delay_ms: 1000,
+  timing_ranges: {
+    poll_interval_seconds: { min: 60, max: 1800 },
+    contact_type_delay_ms: { min: 10, max: 500 },
+    contact_action_delay_ms: { min: 100, max: 10000 },
+  },
+  exclude_furnished: true,
 }
 
 function sectionSubtitle(view: View, o: Overview): string {
@@ -164,6 +184,52 @@ function sectionSubtitle(view: View, o: Overview): string {
     case "templates": return "AI-Prompt und Nachrichten-Template pro Kampagne."
     case "listings":  return "Gefundene Wohnungen aller Profile."
   }
+}
+
+// TimingSlider — controlled range input with live label. onPreview fires while
+// dragging (UI only), onCommit fires once on release/blur (POSTs the value).
+function TimingSlider({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  step,
+  format,
+  onPreview,
+  onCommit,
+}: {
+  label: string
+  hint: string
+  value: number
+  min: number
+  max: number
+  step: number
+  format: (v: number) => string
+  onPreview: (v: number) => void
+  onCommit: (v: number) => void
+}) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline justify-between">
+        <label className="text-xs font-semibold">{label}</label>
+        <span className="font-mono text-xs tabular-nums text-foreground">{format(value)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onPreview(Number(e.target.value))}
+        onMouseUp={(e) => onCommit(Number((e.target as HTMLInputElement).value))}
+        onTouchEnd={(e) => onCommit(Number((e.target as HTMLInputElement).value))}
+        onKeyUp={(e) => onCommit(Number((e.target as HTMLInputElement).value))}
+        className="w-full h-2 cursor-pointer appearance-none rounded-full bg-muted accent-foreground"
+      />
+      <p className="text-[11px] text-muted-foreground">{hint}</p>
+    </div>
+  )
 }
 
 export default function DashboardPage() {
@@ -264,12 +330,16 @@ export default function DashboardPage() {
     }
   }, [loadData])
 
-  // Set Settings (Auto Contact Mode / Quiet Hours)
+  // Set Settings (Auto Contact Mode / Quiet Hours / Timing)
   const setSetting = async (body: {
     contact_mode?: string
     quiet_hours?: boolean
     quiet_hours_start?: string
     quiet_hours_end?: string
+    poll_interval_seconds?: number
+    contact_type_delay_ms?: number
+    contact_action_delay_ms?: number
+    exclude_furnished?: boolean
   }) => {
     try {
       const oData = await api("/api/settings", {
@@ -716,6 +786,77 @@ export default function DashboardPage() {
                     }
                     onBlur={(e) => setSetting({ quiet_hours_end: e.target.value })}
                     className="h-8 w-[110px] font-mono text-xs"
+                  />
+                </div>
+              </div>
+
+              {/* Timing: poll interval + contact form delays. Edits commit on
+                  pointer release (onMouseUp/onTouchEnd) so dragging the slider
+                  doesn't fire a POST per pixel. */}
+              <div className="space-y-4 rounded-lg border p-3 bg-muted/10">
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-sm font-semibold">Timing</span>
+                  <span className="text-xs text-muted-foreground">
+                    Wie schnell neue Wohnungen entdeckt und angeschrieben werden.
+                  </span>
+                </div>
+
+                <TimingSlider
+                  label="Poll-Intervall"
+                  hint="Wartezeit zwischen IS24-Suchen. Kürzer = schneller entdeckt, aber höheres Sperrungsrisiko."
+                  value={currentOverview.poll_interval_seconds}
+                  min={currentOverview.timing_ranges.poll_interval_seconds.min}
+                  max={currentOverview.timing_ranges.poll_interval_seconds.max}
+                  step={30}
+                  format={(s) => (s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`)}
+                  onPreview={(v) =>
+                    setOverview(prev => prev ? { ...prev, poll_interval_seconds: v } : prev)
+                  }
+                  onCommit={(v) => setSetting({ poll_interval_seconds: v })}
+                />
+
+                <TimingSlider
+                  label="Tipp-Verzögerung"
+                  hint="Zeit zwischen den Buchstaben beim Tippen im Kontaktformular (Anti-Bot)."
+                  value={currentOverview.contact_type_delay_ms}
+                  min={currentOverview.timing_ranges.contact_type_delay_ms.min}
+                  max={currentOverview.timing_ranges.contact_type_delay_ms.max}
+                  step={10}
+                  format={(ms) => `${ms} ms`}
+                  onPreview={(v) =>
+                    setOverview(prev => prev ? { ...prev, contact_type_delay_ms: v } : prev)
+                  }
+                  onCommit={(v) => setSetting({ contact_type_delay_ms: v })}
+                />
+
+                <TimingSlider
+                  label="Aktions-Pause"
+                  hint="Pause zwischen Klick/Feldwechsel im Kontaktformular."
+                  value={currentOverview.contact_action_delay_ms}
+                  min={currentOverview.timing_ranges.contact_action_delay_ms.min}
+                  max={currentOverview.timing_ranges.contact_action_delay_ms.max}
+                  step={100}
+                  format={(ms) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`)}
+                  onPreview={(v) =>
+                    setOverview(prev => prev ? { ...prev, contact_action_delay_ms: v } : prev)
+                  }
+                  onCommit={(v) => setSetting({ contact_action_delay_ms: v })}
+                />
+              </div>
+
+              {/* Filter — global rules applied to every search profile. */}
+              <div className="space-y-2 rounded-lg border p-3 bg-muted/10">
+                <div className="flex items-center justify-between">
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-sm font-semibold">Möblierte Wohnungen ausschließen</span>
+                    <span className="text-xs text-muted-foreground">
+                      Listings mit „möbliert", „furnished" etc. in Titel/Beschreibung werden weder gemeldet noch angeschrieben.
+                      Auf IS24 ist das nicht filterbar, der Bot prüft das selbst.
+                    </span>
+                  </div>
+                  <Switch
+                    checked={currentOverview.exclude_furnished}
+                    onCheckedChange={(checked) => setSetting({ exclude_furnished: checked })}
                   />
                 </div>
               </div>

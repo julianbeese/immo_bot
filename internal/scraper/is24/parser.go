@@ -322,6 +322,13 @@ func (p *Parser) populateFromJSONLD(listing *domain.Listing, data map[string]int
 			listing.Price = int(price)
 		}
 	}
+
+	// Ansprechpartner via JSON-LD realEstateAgent (preferred when present).
+	if agent, ok := data["realEstateAgent"].(map[string]interface{}); ok {
+		if name := strings.TrimSpace(getString(agent, "name")); name != "" {
+			listing.ContactPerson = name
+		}
+	}
 }
 
 func (p *Parser) extractExposeDetails(listing *domain.Listing, html string) {
@@ -386,10 +393,18 @@ func (p *Parser) extractExposeDetails(listing *domain.Listing, html string) {
 		listing.HasElevator = true
 	}
 
-	// Landlord info
+	// Landlord (agency) name. The realtor-title class typically holds the
+	// company / agency name, not the personal Ansprechpartner.
 	landlordPattern := regexp.MustCompile(`<span[^>]*class="[^"]*realtor-title[^"]*"[^>]*>([^<]+)</span>`)
 	if matches := landlordPattern.FindStringSubmatch(html); len(matches) > 1 {
 		listing.LandlordName = strings.TrimSpace(matches[1])
+	}
+
+	// Ansprechpartner (contact person) - IS24 exposes this in several places
+	// depending on the listing type. Try each pattern in order; the first hit
+	// that yields a plausible person name (two+ tokens) wins.
+	if listing.ContactPerson == "" {
+		listing.ContactPerson = extractContactPerson(html)
 	}
 
 	// Contact form URL
@@ -400,6 +415,72 @@ func (p *Parser) extractExposeDetails(listing *domain.Listing, html string) {
 			listing.ContactFormURL = baseURL + listing.ContactFormURL
 		}
 	}
+}
+
+// contactPersonPatterns lists the HTML/JS patterns we try (in order) to pull
+// the Ansprechpartner out of an IS24 expose. IS24 ships several layouts; the
+// first match that looks like a real person name wins. Ordering matters:
+// specific IS24-prefixed classes come before generic JSON keys.
+var contactPersonPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`<p[^>]*class="[^"]*is24qa-contact-name[^"]*"[^>]*>([^<]+)</p>`),
+	regexp.MustCompile(`<span[^>]*class="[^"]*is24qa-contact-name[^"]*"[^>]*>([^<]+)</span>`),
+	regexp.MustCompile(`<div[^>]*class="[^"]*is24qa-contact-name[^"]*"[^>]*>([^<]+)</div>`),
+	regexp.MustCompile(`<[^>]*data-qa="contactName"[^>]*>([^<]+)<`),
+	regexp.MustCompile(`<[^>]*data-qa="contact-name"[^>]*>([^<]+)<`),
+	regexp.MustCompile(`<p[^>]*class="[^"]*is24qa-contact-name-anbieter[^"]*"[^>]*>([^<]+)</p>`),
+	regexp.MustCompile(`"contactName"\s*:\s*"([^"]+)"`),
+	regexp.MustCompile(`"contactPerson"\s*:\s*"([^"]+)"`),
+	regexp.MustCompile(`"firstname"\s*:\s*"([^"]+)"\s*,\s*"lastname"\s*:\s*"([^"]+)"`),
+	regexp.MustCompile(`(?i)Ansprechpartner[^<]*<[^>]*>\s*([A-ZÄÖÜ][\w\-\.]+(?:\s+[A-ZÄÖÜ][\w\-\.]+)+)`),
+}
+
+// extractContactPerson scans the expose HTML for a plausible Ansprechpartner
+// name. Returns "" if no pattern matched a name that looks like a person
+// (i.e. has at least two whitespace-separated tokens with leading capitals).
+func extractContactPerson(html string) string {
+	for _, re := range contactPersonPatterns {
+		matches := re.FindStringSubmatch(html)
+		if len(matches) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(matches[1])
+		// Special-case the first/last regex variant.
+		if len(matches) >= 3 && matches[2] != "" {
+			name = strings.TrimSpace(matches[1]) + " " + strings.TrimSpace(matches[2])
+		}
+		name = strings.Join(strings.Fields(name), " ")
+		if isPlausiblePersonName(name) {
+			return name
+		}
+	}
+	return ""
+}
+
+// isPlausiblePersonName filters out company names and other false positives.
+// Requires two+ whitespace-separated tokens, none of which look like company
+// suffixes (GmbH, AG, KG, etc.).
+func isPlausiblePersonName(name string) bool {
+	if name == "" {
+		return false
+	}
+	tokens := strings.Fields(name)
+	if len(tokens) < 2 {
+		return false
+	}
+	lower := strings.ToLower(name)
+	companyMarkers := []string{
+		"gmbh", "ag", " kg", "ohg", "ug ", "ug,",
+		"e.k.", "e.k ", "immobilien", "immobilie",
+		"makler", "verwaltung", "hausverwaltung",
+		"genossenschaft", "wohnungsbau", "real estate",
+		"& co", "und partner", "u. partner",
+	}
+	for _, marker := range companyMarkers {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 // Helper functions

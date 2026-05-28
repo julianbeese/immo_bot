@@ -57,6 +57,14 @@ type Scheduler struct {
 	// window. When nil, the scheduler falls back to cfg.IsWithinQuietHours.
 	isWithinQuietHours func(time.Time) bool
 
+	// Returns the current poll interval. When nil, the scheduler uses
+	// cfg.PollInterval (static). Dashboard wires this to control.GetPollInterval
+	// so changes take effect on the next tick.
+	pollIntervalFn func() time.Duration
+	// Receives a ping whenever the poll interval changes; the run loop resets
+	// its timer. nil = no live updates (tests / no dashboard).
+	pollIntervalReset <-chan struct{}
+
 	mu      sync.Mutex
 	running bool
 	stopCh  chan struct{}
@@ -74,8 +82,12 @@ const cookieWarnThreshold = 3
 
 // MessageEnhancer enhances messages (OpenAI integration). campaignPrompt
 // overrides the enhancer's default system prompt per campaign.
+// ClassifyGender returns SalutationMale / SalutationFemale / SalutationUnknown
+// for an Ansprechpartner name; the scheduler caches the result on the listing
+// so the call only fires once per listing.
 type MessageEnhancer interface {
 	Enhance(ctx context.Context, message string, listing *domain.Listing, campaignPrompt string) (string, error)
+	ClassifyGender(ctx context.Context, name string) (string, error)
 }
 
 // Campaign is the resolved personalization bundle for one search strategy.
@@ -144,6 +156,28 @@ func (s *Scheduler) SetQuietHoursCallback(fn func() *bool) {
 // the start/end times can be changed at runtime (e.g. via the dashboard).
 func (s *Scheduler) SetQuietWindowCallback(fn func(time.Time) bool) {
 	s.isWithinQuietHours = fn
+}
+
+// SetPollIntervalSource wires a dynamic poll-interval source. fn is called
+// before each timer reset; reset is pinged when the value changes so the
+// current sleep can be cut short. Either may be nil for a static interval.
+func (s *Scheduler) SetPollIntervalSource(fn func() time.Duration, reset <-chan struct{}) {
+	s.pollIntervalFn = fn
+	s.pollIntervalReset = reset
+}
+
+// currentPollInterval returns the live interval (callback when set, else
+// config fallback). Always > 0 to keep the timer healthy.
+func (s *Scheduler) currentPollInterval() time.Duration {
+	if s.pollIntervalFn != nil {
+		if d := s.pollIntervalFn(); d > 0 {
+			return d
+		}
+	}
+	if s.cfg.PollInterval > 0 {
+		return s.cfg.PollInterval
+	}
+	return 5 * time.Minute
 }
 
 // SetIS24Cookie hot-reloads the IS24 cookie: applies it to the client (so the
@@ -220,8 +254,11 @@ func (s *Scheduler) run(ctx context.Context) {
 		s.notifyError(ctx, err)
 	}
 
-	ticker := time.NewTicker(s.cfg.PollInterval)
-	defer ticker.Stop()
+	// Timer-based loop instead of a fixed-duration ticker, so the dashboard can
+	// change the poll interval at runtime. The reset channel cuts the current
+	// sleep short the moment the new value is set.
+	timer := time.NewTimer(s.currentPollInterval())
+	defer timer.Stop()
 
 	for {
 		select {
@@ -229,11 +266,23 @@ func (s *Scheduler) run(ctx context.Context) {
 			return
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-s.pollIntervalReset:
+			// Setting changed mid-sleep — start over with the new value.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			d := s.currentPollInterval()
+			s.logger.Info("poll interval changed, resetting timer", "interval", d)
+			timer.Reset(d)
+		case <-timer.C:
 			if err := s.poll(ctx); err != nil {
 				s.logger.Error("poll failed", "error", err)
 				s.notifyError(ctx, err)
 			}
+			timer.Reset(s.currentPollInterval())
 		}
 	}
 }
@@ -498,6 +547,34 @@ func (s *Scheduler) applyCampaignOverrides(ctx context.Context, camp Campaign) C
 	return camp
 }
 
+// ensureSalutation classifies the listing's Ansprechpartner gender via OpenAI
+// once and caches the result in the DB. No-op when the listing has no contact
+// person or already has a cached salutation. Errors are logged and the
+// listing's salutation stays unknown (template falls back to "Sehr geehrte
+// Damen und Herren,"). Always returns the resolved listing state so callers
+// can render the message right away.
+func (s *Scheduler) ensureSalutation(ctx context.Context, listing *domain.Listing) {
+	if listing.ContactPerson == "" || listing.ContactSalutation != "" {
+		return
+	}
+	if s.enhancer == nil {
+		return
+	}
+	gender, err := s.enhancer.ClassifyGender(ctx, listing.ContactPerson)
+	if err != nil {
+		s.logger.Warn("gender classification failed",
+			"is24_id", listing.IS24ID,
+			"contact_person", listing.ContactPerson,
+			"error", err)
+		gender = domain.SalutationUnknown
+	}
+	listing.ContactSalutation = gender
+	if err := s.repo.UpdateListingContact(ctx, listing.ID, listing.ContactPerson, gender); err != nil {
+		s.logger.Warn("failed to cache contact salutation",
+			"id", listing.ID, "error", err)
+	}
+}
+
 func (s *Scheduler) sendContacts(ctx context.Context) error {
 	if s.contacter == nil {
 		return nil
@@ -510,6 +587,10 @@ func (s *Scheduler) sendContacts(ctx context.Context) error {
 
 	for _, listing := range listings {
 		camp := s.campaignFor(ctx, &listing)
+
+		// Classify Ansprechpartner gender (cached) so the template renders the
+		// personalized salutation. Falls back silently to gender-neutral.
+		s.ensureSalutation(ctx, &listing)
 
 		// Generate message
 		message, err := camp.Generator.Generate(&listing)
@@ -585,6 +666,10 @@ func (s *Scheduler) sendTestPreviews(ctx context.Context) error {
 
 	for _, listing := range listings {
 		camp := s.campaignFor(ctx, &listing)
+
+		// Classify Ansprechpartner gender (cached) so the template renders the
+		// personalized salutation. Falls back silently to gender-neutral.
+		s.ensureSalutation(ctx, &listing)
 
 		// Generate message
 		message, err := camp.Generator.Generate(&listing)

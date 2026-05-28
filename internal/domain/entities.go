@@ -52,6 +52,12 @@ type Listing struct {
 	Description     string    `json:"description,omitempty"`
 	LandlordName    string    `json:"landlord_name,omitempty"`
 	LandlordType    string    `json:"landlord_type,omitempty"`
+	// ContactPerson is the individual Ansprechpartner (e.g. "Max Mustermann"),
+	// separate from LandlordName (realtor agency). ContactSalutation caches the
+	// gender classification used to render the personalized salutation; one of
+	// SalutationMale, SalutationFemale, SalutationUnknown.
+	ContactPerson     string `json:"contact_person,omitempty"`
+	ContactSalutation string `json:"contact_salutation,omitempty"`
 	ImageURLs       []string  `json:"image_urls,omitempty"`
 	ContactFormURL  string    `json:"contact_form_url,omitempty"`
 	SearchProfileID int64     `json:"search_profile_id"`
@@ -95,6 +101,14 @@ type ActivityLog struct {
 	ErrorMsg   string    `json:"error_msg,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }
+
+// Salutation constants cache gender classification on a Listing. UNKNOWN
+// (or empty) makes the messenger fall back to the gender-neutral salutation.
+const (
+	SalutationMale    = "MALE"
+	SalutationFemale  = "FEMALE"
+	SalutationUnknown = "UNKNOWN"
+)
 
 // MessageStatus constants
 const (

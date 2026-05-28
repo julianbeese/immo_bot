@@ -72,7 +72,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/campaigns/{name}", s.handleSaveCampaign)
 	mux.HandleFunc("POST /api/settings", s.handleSettings)
 	mux.HandleFunc("GET /api/cookie", s.handleGetCookie)
-	mux.HandleFunc("POST /api/cookie", s.handleSetCookie)
+	// Cookie update is the only endpoint that needs CORS: a bookmarklet on
+	// immobilienscout24.de POSTs document.cookie here for one-click refresh.
+	// All other API routes stay same-origin.
+	mux.HandleFunc("POST /api/cookie", corsCookie(s.handleSetCookie))
+	mux.HandleFunc("OPTIONS /api/cookie", corsCookie(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
 	mux.HandleFunc("POST /api/profiles", s.handleAddProfile)
 	mux.HandleFunc("POST /api/profiles/{id}/active", s.handleSetProfileActive)
 	mux.HandleFunc("DELETE /api/profiles/{id}", s.handleDeleteProfile)
@@ -104,14 +110,23 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	qStart, qEnd := s.ctrl.QuietHoursWindow()
 	resp := map[string]any{
-		"contact_mode":      modeString(s.ctrl.GetContactMode()),
-		"contact_label":     s.ctrl.ContactModeLabel(),
-		"quiet_hours":       derefBool(s.ctrl.IsQuietHoursEnabled()),
-		"quiet_hours_start": qStart,
-		"quiet_hours_end":   qEnd,
-		"last_poll":         lastPoll,
-		"default_campaign":  s.cfg.DefaultCampaign,
-		"campaigns":         s.campaignNames(),
+		"contact_mode":             modeString(s.ctrl.GetContactMode()),
+		"contact_label":            s.ctrl.ContactModeLabel(),
+		"quiet_hours":              derefBool(s.ctrl.IsQuietHoursEnabled()),
+		"quiet_hours_start":        qStart,
+		"quiet_hours_end":          qEnd,
+		"last_poll":                lastPoll,
+		"default_campaign":         s.cfg.DefaultCampaign,
+		"campaigns":                s.campaignNames(),
+		"poll_interval_seconds":    int(s.ctrl.GetPollInterval().Seconds()),
+		"contact_type_delay_ms":    s.ctrl.GetContactTypeDelay().Milliseconds(),
+		"contact_action_delay_ms":  s.ctrl.GetContactActionDelay().Milliseconds(),
+		"exclude_furnished":        s.ctrl.IsExcludeFurnishedEnabled(),
+		"timing_ranges": map[string]map[string]int64{
+			"poll_interval_seconds":   {"min": int64(control.MinPollInterval.Seconds()), "max": int64(control.MaxPollInterval.Seconds())},
+			"contact_type_delay_ms":   {"min": control.MinContactTypeDelay.Milliseconds(), "max": control.MaxContactTypeDelay.Milliseconds()},
+			"contact_action_delay_ms": {"min": control.MinContactActionDelay.Milliseconds(), "max": control.MaxContactActionDelay.Milliseconds()},
+		},
 		"stats": map[string]int{
 			"total":     total,
 			"notified":  notified,
@@ -239,10 +254,14 @@ func (s *Server) handleSaveCampaign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ContactMode     *string `json:"contact_mode"`
-		QuietHours      *bool   `json:"quiet_hours"`
-		QuietHoursStart *string `json:"quiet_hours_start"`
-		QuietHoursEnd   *string `json:"quiet_hours_end"`
+		ContactMode          *string `json:"contact_mode"`
+		QuietHours           *bool   `json:"quiet_hours"`
+		QuietHoursStart      *string `json:"quiet_hours_start"`
+		QuietHoursEnd        *string `json:"quiet_hours_end"`
+		PollIntervalSeconds  *int    `json:"poll_interval_seconds"`
+		ContactTypeDelayMs   *int    `json:"contact_type_delay_ms"`
+		ContactActionDelayMs *int    `json:"contact_action_delay_ms"`
+		ExcludeFurnished     *bool   `json:"exclude_furnished"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -258,6 +277,30 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.QuietHours != nil {
 		s.ctrl.SetQuietHours(*body.QuietHours)
+	}
+	if body.PollIntervalSeconds != nil {
+		if *body.PollIntervalSeconds <= 0 {
+			writeErr(w, http.StatusBadRequest, errors.New("poll_interval_seconds must be positive"))
+			return
+		}
+		s.ctrl.SetPollInterval(time.Duration(*body.PollIntervalSeconds) * time.Second)
+	}
+	if body.ContactTypeDelayMs != nil {
+		if *body.ContactTypeDelayMs <= 0 {
+			writeErr(w, http.StatusBadRequest, errors.New("contact_type_delay_ms must be positive"))
+			return
+		}
+		s.ctrl.SetContactTypeDelay(time.Duration(*body.ContactTypeDelayMs) * time.Millisecond)
+	}
+	if body.ContactActionDelayMs != nil {
+		if *body.ContactActionDelayMs <= 0 {
+			writeErr(w, http.StatusBadRequest, errors.New("contact_action_delay_ms must be positive"))
+			return
+		}
+		s.ctrl.SetContactActionDelay(time.Duration(*body.ContactActionDelayMs) * time.Millisecond)
+	}
+	if body.ExcludeFurnished != nil {
+		s.ctrl.SetExcludeFurnished(*body.ExcludeFurnished)
 	}
 	// Quiet-hours window is set as a pair. Allow updating one side by passing
 	// the existing value for the other (frontend does this automatically).
@@ -298,6 +341,32 @@ func (s *Server) handleGetCookie(w http.ResponseWriter, r *http.Request) {
 		resp["source"] = "env"
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// allowedCookieOrigins is the closed list of origins permitted to POST a
+// fresh IS24 cookie via the bookmarklet. Keeping this short means the
+// dashboard's only CORS-enabled endpoint can't be abused by random sites the
+// user happens to visit. Extend deliberately, not via env.
+var allowedCookieOrigins = map[string]struct{}{
+	"https://www.immobilienscout24.de": {},
+	"https://immobilienscout24.de":     {},
+}
+
+// corsCookie wraps a handler so it accepts the bookmarklet's cross-origin POST
+// from immobilienscout24.de. Other origins receive no CORS headers, so the
+// browser blocks the call before the handler ever runs.
+func corsCookie(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if _, ok := allowedCookieOrigins[origin]; ok {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "600")
+		}
+		next(w, r)
+	}
 }
 
 // handleSetCookie hot-reloads the IS24 cookie via the scheduler-supplied

@@ -192,6 +192,79 @@ func (e *OpenAIEnhancer) IsEnabled() bool {
 	return e.enabled && e.apiKey != ""
 }
 
+// ClassifyGender returns SalutationMale / SalutationFemale based on the given
+// person name (first or full name) using a light GPT call. Returns
+// SalutationUnknown when the API is disabled, the call fails, or the model is
+// uncertain — callers fall back to the gender-neutral salutation in that case.
+func (e *OpenAIEnhancer) ClassifyGender(ctx context.Context, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return domain.SalutationUnknown, nil
+	}
+	if !e.enabled || e.apiKey == "" {
+		return domain.SalutationUnknown, nil
+	}
+
+	request := openAIRequest{
+		Model: e.model,
+		Messages: []openAIMessage{
+			{
+				Role: "system",
+				Content: "You classify the likely gender of a German contact " +
+					"person name. Answer with exactly one token: MALE, FEMALE " +
+					"or UNKNOWN. UNKNOWN if the name is gender-neutral, " +
+					"unisex, a company, or you are uncertain. No explanation.",
+			},
+			{
+				Role:    "user",
+				Content: name,
+			},
+		},
+		MaxTokens:   3,
+		Temperature: 0,
+	}
+
+	body, err := json.Marshal(request)
+	if err != nil {
+		return domain.SalutationUnknown, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIAPIURL, bytes.NewReader(body))
+	if err != nil {
+		return domain.SalutationUnknown, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+e.apiKey)
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return domain.SalutationUnknown, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return domain.SalutationUnknown, fmt.Errorf("OpenAI gender classify: %d - %s", resp.StatusCode, string(respBody))
+	}
+
+	var response openAIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return domain.SalutationUnknown, err
+	}
+	if len(response.Choices) == 0 {
+		return domain.SalutationUnknown, nil
+	}
+
+	answer := strings.ToUpper(strings.TrimSpace(response.Choices[0].Message.Content))
+	answer = strings.Trim(answer, ".,!? \"'")
+	switch answer {
+	case domain.SalutationMale, domain.SalutationFemale:
+		return answer, nil
+	default:
+		return domain.SalutationUnknown, nil
+	}
+}
+
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s

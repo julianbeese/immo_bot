@@ -21,6 +21,7 @@ type Config struct {
 	Telegram   TelegramConfig   `yaml:"telegram"`
 	WhatsApp   WhatsAppConfig   `yaml:"whatsapp"`
 	OpenAI     OpenAIConfig     `yaml:"openai"`
+	Email      EmailConfig      `yaml:"email"`
 	Contact    ContactConfig    `yaml:"contact"`
 	Message    MessageConfig    `yaml:"message"`
 	QuietHours QuietHoursConfig `yaml:"quiet_hours"`
@@ -122,6 +123,17 @@ type OpenAIConfig struct {
 	Enabled bool   `yaml:"enabled"`
 }
 
+// EmailConfig for IMAP monitoring of IS24-related provider replies.
+type EmailConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	IMAPHost string        `yaml:"imap_host"` // host:port, implicit TLS, e.g. "imap.gmail.com:993"
+	Username string        `yaml:"username"`
+	Password string        `yaml:"password"` // app password
+	Mailbox  string        `yaml:"mailbox"`  // default "INBOX"
+	Lookback time.Duration `yaml:"lookback"` // coarse SINCE window, default 72h
+	Senders  []string      `yaml:"senders"`  // From-substring filters; empty → built-in IS24 defaults
+}
+
 // ContactConfig for auto-contact settings
 type ContactConfig struct {
 	Enabled     bool           `yaml:"enabled"`
@@ -191,6 +203,11 @@ func DefaultConfig() *Config {
 		OpenAI: OpenAIConfig{
 			Model:   "gpt-4o-mini",
 			Enabled: false,
+		},
+		Email: EmailConfig{
+			Enabled:  false,
+			Mailbox:  "INBOX",
+			Lookback: 72 * time.Hour,
 		},
 		Contact: ContactConfig{
 			Enabled:     false,
@@ -296,6 +313,14 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("DATABASE_PATH"); v != "" {
 		cfg.DatabasePath = v
 	}
+
+	if err := applyEnvBool("EMAIL_ENABLED", &cfg.Email.Enabled); err != nil {
+		return nil, err
+	}
+	applyEnvString("EMAIL_IMAP_HOST", &cfg.Email.IMAPHost)
+	applyEnvString("EMAIL_USERNAME", &cfg.Email.Username)
+	applyEnvString("EMAIL_PASSWORD", &cfg.Email.Password)
+	applyEnvString("EMAIL_MAILBOX", &cfg.Email.Mailbox)
 
 	if err := applyEnvBool("BACKUP_ENABLED", &cfg.Backup.Enabled); err != nil {
 		return nil, err
@@ -478,6 +503,20 @@ func (c *Config) Validate() error {
 		}
 		if strings.TrimSpace(c.OpenAI.Model) == "" {
 			problems = append(problems, "openai.model is required when openai.enabled is true")
+		}
+	}
+	if c.Email.Enabled {
+		if strings.TrimSpace(c.Email.IMAPHost) == "" {
+			problems = append(problems, "email.imap_host or EMAIL_IMAP_HOST is required when email.enabled is true")
+		}
+		if strings.TrimSpace(c.Email.Username) == "" {
+			problems = append(problems, "email.username or EMAIL_USERNAME is required when email.enabled is true")
+		}
+		if strings.TrimSpace(c.Email.Password) == "" {
+			problems = append(problems, "email.password or EMAIL_PASSWORD is required when email.enabled is true")
+		}
+		if !c.OpenAI.Enabled {
+			problems = append(problems, "openai must be enabled when email.enabled is true (classification requires it)")
 		}
 	}
 	if c.Contact.Enabled {

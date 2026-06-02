@@ -293,10 +293,15 @@ WICHTIG: Erwähne KEINE Besichtigung - das kommt später im Text.
 Vermeide Phrasen wie "Sehr geehrte", "Mit freundlichen Grüßen", "besichtigen", "Besichtigung" - nur den Mittelteil über die Wohnung selbst.`
 
 type openAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens"`
-	Temperature float64         `json:"temperature"`
+	Model          string          `json:"model"`
+	Messages       []openAIMessage `json:"messages"`
+	MaxTokens      int             `json:"max_tokens"`
+	Temperature    float64         `json:"temperature"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+}
+
+type responseFormat struct {
+	Type string `json:"type"` // e.g. "json_object"
 }
 
 type openAIMessage struct {

@@ -45,6 +45,18 @@ openai:
   model: "gpt-4o-mini"
   enabled: false # Set true or via OPENAI_ENABLED env var
 
+# IMAP inbox monitor: scans for IS24-related mails and uses the AI (openai must
+# be enabled) to flag genuine provider/landlord replies that arrived by email
+# instead of via the IS24 chat. Alerts via Telegram/WhatsApp + dashboard.
+email:
+  enabled: false              # Set true or via EMAIL_ENABLED env var
+  imap_host: ""               # host:port, implicit TLS, e.g. imap.gmail.com:993 (EMAIL_IMAP_HOST)
+  username: ""                # mailbox login (EMAIL_USERNAME)
+  password: ""                # app password — set via EMAIL_PASSWORD env var, not here
+  mailbox: "INBOX"            # folder to scan (EMAIL_MAILBOX)
+  lookback: 72h               # coarse server-side date window per poll
+  senders: []                 # From-substring filters; empty → built-in IS24 defaults
+
 contact:
   enabled: false # Set true or via CONTACT_ENABLED env var
   type_delay: 50ms

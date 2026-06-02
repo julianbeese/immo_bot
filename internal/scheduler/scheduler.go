@@ -11,6 +11,7 @@ import (
 	"github.com/julianbeese/immo_bot/internal/config"
 	"github.com/julianbeese/immo_bot/internal/contact"
 	"github.com/julianbeese/immo_bot/internal/domain"
+	"github.com/julianbeese/immo_bot/internal/email"
 	"github.com/julianbeese/immo_bot/internal/filter"
 	"github.com/julianbeese/immo_bot/internal/messenger"
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
@@ -49,6 +50,7 @@ type Scheduler struct {
 	campaigns CampaignResolver
 	enhancer  MessageEnhancer
 	contacter *contact.Submitter
+	emailMon  *email.Monitor // optional inbox monitor (nil = disabled)
 	logger    *slog.Logger
 
 	// Callbacks to check contact mode
@@ -139,6 +141,10 @@ func NewScheduler(
 		isQuietHoursEnabled:   func() *bool { return nil }, // nil = use config
 	}
 }
+
+// SetEmailMonitor wires the optional IMAP inbox monitor. When set, each poll
+// cycle also scans for IS24-related provider replies.
+func (s *Scheduler) SetEmailMonitor(m *email.Monitor) { s.emailMon = m }
 
 // SetAutoContactCallback sets the callback to check if auto-contact is enabled
 func (s *Scheduler) SetAutoContactCallback(fn func() bool) {
@@ -355,6 +361,15 @@ func (s *Scheduler) poll(ctx context.Context) error {
 			if err := s.sendApprovalRequests(ctx); err != nil {
 				s.logger.Error("approval request failed", "error", err)
 			}
+		}
+	}
+
+	// Scan the mailbox for IS24 provider replies. Runs regardless of quiet
+	// hours: it only reads mail and alerts on genuine inbound replies, which are
+	// time-sensitive and low-volume (the AI classifier filters out noise).
+	if s.emailMon != nil {
+		if err := s.emailMon.Poll(ctx); err != nil {
+			s.logger.Error("email monitor poll failed", "error", err)
 		}
 	}
 

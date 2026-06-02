@@ -22,6 +22,7 @@ import (
 	"github.com/julianbeese/immo_bot/internal/contact"
 	"github.com/julianbeese/immo_bot/internal/control"
 	"github.com/julianbeese/immo_bot/internal/domain"
+	"github.com/julianbeese/immo_bot/internal/email"
 	"github.com/julianbeese/immo_bot/internal/filter"
 	"github.com/julianbeese/immo_bot/internal/messenger"
 	"github.com/julianbeese/immo_bot/internal/notifier"
@@ -181,9 +182,15 @@ func main() {
 		logger.Info("OpenAI message enhancement enabled", "model", cfg.OpenAI.Model)
 	}
 
-	// Initialize contact submitter
+	// Initialize contact submitter. When OpenAI is configured, wire an LLM
+	// form-filler as fallback for when the static selectors miss IS24's DOM.
 	var contacter *contact.Submitter
 	if cfg.Contact.Enabled {
+		var mapper contact.FieldMapper
+		if cfg.OpenAI.Enabled && cfg.OpenAI.APIKey != "" {
+			mapper = messenger.NewOpenAIFormFiller(cfg.OpenAI.APIKey, cfg.OpenAI.Model)
+			logger.Info("contact form llm fallback enabled", "model", cfg.OpenAI.Model)
+		}
 		contacter = contact.NewSubmitter(
 			cfg.IS24.Cookie,
 			toContactProfile(cfg.Contact.Profile),
@@ -191,6 +198,8 @@ func main() {
 			humanBehavior,
 			proxy,
 			bandwidth,
+			mapper,
+			logger,
 		)
 		logger.Info("auto-contact ready (controlled via Telegram)")
 	}
@@ -215,6 +224,22 @@ func main() {
 		contacter,
 		logger,
 	)
+
+	// Wire the IMAP inbox monitor (IS24 provider replies). Requires OpenAI for
+	// classification (enforced in config.Validate).
+	if cfg.Email.Enabled {
+		emailClient := email.NewClient(email.Config{
+			Addr:     cfg.Email.IMAPHost,
+			Username: cfg.Email.Username,
+			Password: cfg.Email.Password,
+			Mailbox:  cfg.Email.Mailbox,
+			Senders:  cfg.Email.Senders,
+			Lookback: cfg.Email.Lookback,
+		})
+		classifier := messenger.NewOpenAIEmailClassifier(cfg.OpenAI.APIKey, cfg.OpenAI.Model)
+		sched.SetEmailMonitor(email.NewMonitor(emailClient, classifier, repo, notif, logger))
+		logger.Info("email inbox monitor enabled", "mailbox", cfg.Email.Mailbox, "host", cfg.Email.IMAPHost)
+	}
 
 	// Connect shared controller state to scheduler
 	sched.SetAutoContactCallback(ctrl.IsAutoContactEnabled)

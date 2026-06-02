@@ -26,10 +26,11 @@ import {
   Sparkles,
   FileText,
   LayoutDashboard,
+  Mail,
   Cookie as CookieIcon
 } from "lucide-react"
 
-type View = "overview" | "settings" | "profiles" | "templates" | "listings"
+type View = "overview" | "settings" | "profiles" | "templates" | "listings" | "inbox"
 
 const VIEWS: { key: View; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: "overview",  label: "Übersicht",         icon: LayoutDashboard },
@@ -37,6 +38,7 @@ const VIEWS: { key: View; label: string; icon: React.ComponentType<{ className?:
   { key: "profiles",  label: "Suchprofile",       icon: Building },
   { key: "templates", label: "Nachrichten",       icon: Wand2 },
   { key: "listings",  label: "Wohnungen",         icon: Home },
+  { key: "inbox",     label: "Posteingang",       icon: Mail },
 ]
 
 const STATUS_TONE = {
@@ -129,6 +131,20 @@ interface CampaignCfg {
   template_overridden: boolean
 }
 
+interface InboxMessage {
+  id: number
+  from: string
+  subject: string
+  snippet: string
+  is24_id?: string
+  listing_id?: number
+  is_landlord_reply: boolean
+  summary?: string
+  notified: boolean
+  received_at: string
+  created_at: string
+}
+
 interface Listing {
   id: number
   title: string
@@ -163,6 +179,7 @@ function sectionSubtitle(view: View, o: Overview): string {
     case "profiles":  return "IS24-Suchen, die der Bot zyklisch abfragt."
     case "templates": return "AI-Prompt und Nachrichten-Template pro Kampagne."
     case "listings":  return "Gefundene Wohnungen aller Profile."
+    case "inbox":     return "IS24-E-Mails: erkannte Anbieter-Antworten außerhalb des Chats."
   }
 }
 
@@ -173,6 +190,7 @@ export default function DashboardPage() {
   const [overview, setOverview] = React.useState<Overview | null>(null)
   const [profiles, setProfiles] = React.useState<SearchProfile[]>([])
   const [listings, setListings] = React.useState<Listing[]>([])
+  const [inbox, setInbox] = React.useState<InboxMessage[]>([])
   const [campaigns, setCampaigns] = React.useState<CampaignCfg[]>([])
   // Editable buffers keyed by campaign name; populated from /api/campaigns.
   const [drafts, setDrafts] = React.useState<Record<string, { ai_prompt: string; template: string }>>({})
@@ -223,6 +241,9 @@ export default function DashboardPage() {
       
       const lData = await api("/api/listings?limit=100")
       setListings(lData || [])
+
+      const inData = await api("/api/inbox?limit=100")
+      setInbox(inData || [])
 
       const cData: CampaignCfg[] = (await api("/api/campaigns")) || []
       setCampaigns(cData)
@@ -1239,6 +1260,81 @@ export default function DashboardPage() {
                     <TableRow>
                       <TableCell colSpan={6} className="h-24 text-center text-muted-foreground text-sm">
                         {searchQuery ? "Keine passenden Wohnungen gefunden." : "Noch keine Wohnungen gefunden."}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+        )}
+
+        {view === "inbox" && (
+        <Card className="shadow-sm border border-border/60">
+          <CardHeader className="pb-4">
+            <CardTitle className="text-md font-bold tracking-tight">Posteingang</CardTitle>
+            <CardDescription className="text-xs">
+              {inbox.length} IS24-E-Mails — markiert sind echte Anbieter-Antworten, die nicht über den IS24-Chat kamen.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-md border overflow-hidden">
+              <Table>
+                <TableHeader className="bg-muted/30">
+                  <TableRow>
+                    <TableHead className="w-[140px]">Datum</TableHead>
+                    <TableHead className="w-[200px]">Von</TableHead>
+                    <TableHead>Betreff / Zusammenfassung</TableHead>
+                    <TableHead className="w-[160px] text-right">Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {inbox.length > 0 ? (
+                    inbox.map((m) => (
+                      <TableRow key={m.id} className="hover:bg-muted/10 transition-colors">
+                        <TableCell className="text-xs text-muted-foreground font-mono">
+                          {formatDate(m.received_at || m.created_at)}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground max-w-[200px] truncate">
+                          {esc(m.from)}
+                        </TableCell>
+                        <TableCell className="py-3">
+                          <div className="flex flex-col gap-0.5">
+                            <span className="font-semibold text-sm leading-tight">{esc(m.subject) || "(kein Betreff)"}</span>
+                            {m.summary && (
+                              <span className="text-xs text-muted-foreground">{esc(m.summary)}</span>
+                            )}
+                            {m.is24_id && (
+                              <a
+                                href={`https://www.immobilienscout24.de/expose/${m.is24_id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-xs text-muted-foreground hover:text-primary hover:underline inline-flex items-center gap-1"
+                              >
+                                Exposé {m.is24_id} <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                              </a>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {m.is_landlord_reply ? (
+                            <Badge
+                              variant="outline"
+                              className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.active}`}
+                            >
+                              <Mail className="h-3 w-3" /> Anbieter-Antwort
+                            </Badge>
+                          ) : (
+                            <span className="text-xs text-muted-foreground italic px-2">System / Info</span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  ) : (
+                    <TableRow>
+                      <TableCell colSpan={4} className="h-24 text-center text-muted-foreground text-sm">
+                        Noch keine IS24-E-Mails erkannt.
                       </TableCell>
                     </TableRow>
                   )}

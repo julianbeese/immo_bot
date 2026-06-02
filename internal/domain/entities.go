@@ -73,6 +73,24 @@ type SentMessage struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// InboxMessage is an IS24-related email found in the monitored mailbox, with
+// the AI's verdict on whether it is a genuine reply from a provider/landlord
+// who answered by email instead of via the IS24 chat.
+type InboxMessage struct {
+	ID              int64     `json:"id"`
+	MessageID       string    `json:"message_id"` // RFC822 Message-ID, used for dedupe
+	FromAddr        string    `json:"from"`
+	Subject         string    `json:"subject"`
+	Snippet         string    `json:"snippet"`
+	IS24ID          string    `json:"is24_id,omitempty"`
+	ListingID       int64     `json:"listing_id,omitempty"` // resolved listing, 0 if unmatched
+	IsLandlordReply bool      `json:"is_landlord_reply"`
+	Summary         string    `json:"summary,omitempty"`
+	Notified        bool      `json:"notified"`
+	ReceivedAt      time.Time `json:"received_at"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 // Session stores IS24 authentication cookies
 type Session struct {
 	ID        int64     `json:"id"`

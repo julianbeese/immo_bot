@@ -428,6 +428,90 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 	return &l, nil
 }
 
+// Inbox methods
+
+// InboxExists reports whether a message with the given RFC822 Message-ID has
+// already been stored. Empty messageID is treated as not-existing so such mails
+// are always processed (and may duplicate — rare, since most mails carry one).
+func (r *Repository) InboxExists(ctx context.Context, messageID string) (bool, error) {
+	if messageID == "" {
+		return false, nil
+	}
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM inbox_messages WHERE message_id = ?`, messageID).Scan(&n)
+	return n > 0, err
+}
+
+// CreateInboxMessage inserts a classified inbox message, ignoring duplicates by
+// message_id. On insert the row id and CreatedAt are populated.
+func (r *Repository) CreateInboxMessage(ctx context.Context, m *domain.InboxMessage) error {
+	var listingID any
+	if m.ListingID > 0 {
+		listingID = m.ListingID
+	}
+	res, err := r.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO inbox_messages (
+			message_id, from_addr, subject, snippet, is24_id, listing_id,
+			is_landlord_reply, summary, notified, received_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		m.MessageID, m.FromAddr, m.Subject, m.Snippet, m.IS24ID, listingID,
+		m.IsLandlordReply, m.Summary, m.Notified, m.ReceivedAt,
+	)
+	if err != nil {
+		return err
+	}
+	if id, err := res.LastInsertId(); err == nil && id > 0 {
+		m.ID = id
+		m.CreatedAt = time.Now()
+	}
+	return nil
+}
+
+// ListInboxMessages returns the most recent inbox messages for the dashboard.
+// When landlordOnly is true, only genuine provider replies are returned.
+func (r *Repository) ListInboxMessages(ctx context.Context, limit int, landlordOnly bool) ([]domain.InboxMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	where := "1 = 1"
+	if landlordOnly {
+		where = "is_landlord_reply = 1"
+	}
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, COALESCE(message_id, ''), from_addr, subject, snippet, is24_id,
+			COALESCE(listing_id, 0), is_landlord_reply, summary, notified,
+			received_at, created_at
+		FROM inbox_messages
+		WHERE %s
+		ORDER BY received_at DESC, id DESC
+		LIMIT %d
+	`, where, limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.InboxMessage
+	for rows.Next() {
+		var m domain.InboxMessage
+		var receivedAt sql.NullTime
+		if err := rows.Scan(
+			&m.ID, &m.MessageID, &m.FromAddr, &m.Subject, &m.Snippet, &m.IS24ID,
+			&m.ListingID, &m.IsLandlordReply, &m.Summary, &m.Notified,
+			&receivedAt, &m.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if receivedAt.Valid {
+			m.ReceivedAt = receivedAt.Time
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // GetUnnotifiedListings returns listings that haven't been notified
 func (r *Repository) GetUnnotifiedListings(ctx context.Context) ([]domain.Listing, error) {
 	return r.getListingsByCondition(ctx, "notified = 0", "")

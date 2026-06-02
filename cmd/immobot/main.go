@@ -22,6 +22,7 @@ import (
 	"github.com/julianbeese/immo_bot/internal/contact"
 	"github.com/julianbeese/immo_bot/internal/control"
 	"github.com/julianbeese/immo_bot/internal/domain"
+	"github.com/julianbeese/immo_bot/internal/email"
 	"github.com/julianbeese/immo_bot/internal/filter"
 	"github.com/julianbeese/immo_bot/internal/messenger"
 	"github.com/julianbeese/immo_bot/internal/notifier"
@@ -194,6 +195,22 @@ func main() {
 		contacter,
 		logger,
 	)
+
+	// Wire the IMAP inbox monitor (IS24 provider replies). Requires OpenAI for
+	// classification (enforced in config.Validate).
+	if cfg.Email.Enabled {
+		emailClient := email.NewClient(email.Config{
+			Addr:     cfg.Email.IMAPHost,
+			Username: cfg.Email.Username,
+			Password: cfg.Email.Password,
+			Mailbox:  cfg.Email.Mailbox,
+			Senders:  cfg.Email.Senders,
+			Lookback: cfg.Email.Lookback,
+		})
+		classifier := messenger.NewOpenAIEmailClassifier(cfg.OpenAI.APIKey, cfg.OpenAI.Model)
+		sched.SetEmailMonitor(email.NewMonitor(emailClient, classifier, repo, notif, logger))
+		logger.Info("email inbox monitor enabled", "mailbox", cfg.Email.Mailbox, "host", cfg.Email.IMAPHost)
+	}
 
 	// Connect shared controller state to scheduler
 	sched.SetAutoContactCallback(ctrl.IsAutoContactEnabled)

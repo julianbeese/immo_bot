@@ -67,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", fileServer)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/listings", s.handleListings)
+	mux.HandleFunc("GET /api/inbox", s.handleInbox)
 	mux.HandleFunc("GET /api/profiles", s.handleProfiles)
 	mux.HandleFunc("GET /api/campaigns", s.handleCampaigns)
 	mux.HandleFunc("POST /api/campaigns/{name}", s.handleSaveCampaign)
@@ -148,6 +149,27 @@ func (s *Server) handleListings(w http.ResponseWriter, r *http.Request) {
 		out = append(out, dto{Listing: &listings[i], Campaign: camp})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleInbox returns recent IS24-related emails. ?landlord=1 limits to genuine
+// provider replies; otherwise all classified mails are returned.
+func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	landlordOnly := r.URL.Query().Get("landlord") == "1"
+	msgs, err := s.repo.ListInboxMessages(r.Context(), limit, landlordOnly)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if msgs == nil {
+		msgs = []domain.InboxMessage{}
+	}
+	writeJSON(w, http.StatusOK, msgs)
 }
 
 func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {

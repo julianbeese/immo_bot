@@ -23,9 +23,10 @@ import (
 type ContactMode int
 
 const (
-	ContactModeOff  ContactMode = iota // Observation only
-	ContactModeTest                    // Show message preview, don't send
-	ContactModeOn                      // Actually send contacts
+	ContactModeOff     ContactMode = iota // Observation only
+	ContactModeTest                       // Show message preview, don't send
+	ContactModeApprove                    // Suggest one at a time, send on user approval
+	ContactModeOn                         // Actually send contacts
 )
 
 // SettingsStore is the minimal persistence surface the controller needs.
@@ -283,6 +284,9 @@ func (c *Controller) HandleCommand(raw string) string {
 	case "contact_test":
 		c.SetContactMode(ContactModeTest)
 		return "🧪 *Test-Modus aktiviert*\n\nNeue Wohnungen werden gemeldet und die Nachricht wird dir als Vorschau gezeigt (nicht gesendet)."
+	case "contact_approve":
+		c.SetContactMode(ContactModeApprove)
+		return "🛂 *Approval-Modus aktiviert*\n\nNeue Wohnungen werden einzeln vorgeschlagen — bestätige mit ✅ um die Nachricht zu senden, oder ❌ um sie zu verwerfen."
 	case "quiet_on":
 		c.SetQuietHours(true)
 		s, e := c.QuietHoursWindow()
@@ -380,6 +384,7 @@ func (c *Controller) helpMessage() string {
 
 *Kontakt:*
 /contact_on - Auto-Kontakt aktivieren
+/contact_approve - Vorschläge einzeln bestätigen
 /contact_test - Test-Modus (Nachricht-Vorschau)
 /contact_off - Nur beobachten (kein Kontakt)
 
@@ -440,6 +445,8 @@ func contactModeLabel(mode ContactMode) string {
 		return "⏸ Beobachtungsmodus"
 	case ContactModeTest:
 		return "🧪 Test-Modus (Nachricht-Vorschau)"
+	case ContactModeApprove:
+		return "🛂 Approval-Modus (einzelne Bestätigung)"
 	case ContactModeOn:
 		return "✅ Auto-Kontakt aktiv"
 	}
@@ -447,13 +454,15 @@ func contactModeLabel(mode ContactMode) string {
 }
 
 // contactModeString returns the canonical lower-case mode token used in the
-// meta store and the HTTP API (off/test/on).
+// meta store and the HTTP API (off/test/approve/on).
 func contactModeString(mode ContactMode) string {
 	switch mode {
 	case ContactModeOff:
 		return "off"
 	case ContactModeTest:
 		return "test"
+	case ContactModeApprove:
+		return "approve"
 	case ContactModeOn:
 		return "on"
 	}
@@ -467,6 +476,8 @@ func parseContactMode(s string) (ContactMode, bool) {
 		return ContactModeOff, true
 	case "test":
 		return ContactModeTest, true
+	case "approve":
+		return ContactModeApprove, true
 	case "on":
 		return ContactModeOn, true
 	}
@@ -485,6 +496,14 @@ func (c *Controller) IsTestModeEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.contactMode == ContactModeTest
+}
+
+// IsApprovalModeEnabled reports whether approval mode is on (per-listing
+// confirmation via Telegram inline buttons).
+func (c *Controller) IsApprovalModeEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.contactMode == ContactModeApprove
 }
 
 // IsQuietHoursEnabled returns a pointer to the quiet-hours override flag.

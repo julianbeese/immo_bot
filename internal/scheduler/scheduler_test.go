@@ -20,6 +20,9 @@ func (f *fakeNotifier) NotifyError(context.Context, string) error { return nil }
 func (f *fakeNotifier) NotifyMessagePreview(context.Context, *domain.Listing, string) error {
 	return nil
 }
+func (f *fakeNotifier) NotifyApprovalRequest(context.Context, *domain.Listing, string, int64) error {
+	return nil
+}
 func (f *fakeNotifier) SendRawMessage(_ context.Context, text string) error {
 	f.raw = append(f.raw, text)
 	return nil

@@ -72,6 +72,40 @@ Daten — bevorzugt, damit nichts Persönliches im Repo landet). Env überschrei
 | `CONTACT_ENABLED`, `CONTACT_FIRST_NAME`, `CONTACT_LAST_NAME`, `CONTACT_EMAIL`, `CONTACT_PHONE`, `CONTACT_ADULTS` | Bewerberprofil fürs Kontaktformular |
 | `LOG_LEVEL` | `info` oder `debug` |
 
+### Residential-Proxy (optional, gegen IP-Blocks)
+
+Wenn der Bot leere Suchen liefert weil IS24 / DataDome die VM-IP geflaggt hat
+(typisch bei Datacenter-Ranges wie Hetzner/Contabo), kann ein Residential-Proxy
+mit DE-Geo helfen. Chrome bekommt den Proxy via `--proxy-server`; weil Chrome
+keine Inline-Credentials akzeptiert, beantwortet der Bot Auth-Challenges über
+die CDP-`fetch`-Domain.
+
+In `.env` setzen:
+
+```
+IS24_PROXY_URL=http://gw-de.example.com:7000   # Host:Port ohne user:pass
+IS24_PROXY_USER=...
+IS24_PROXY_PASS=...
+IS24_PROXY_BANDWIDTH_CAP_MB=1800               # Stop bei 1.8 GB (für 2 GB-Tarif)
+```
+
+Die Bandbreiten-Sperre zählt jede Browser-Session via Chrome
+`Network.loadingFinished`-Events (das, was Residential-Anbieter abrechnen) und
+persistiert den Monatsstand in der SQLite-`meta`-Tabelle. Bei 80% Warnung im
+Log, bei 100% wird `ErrBandwidthExceeded` zurückgegeben — neue Polls und
+Kontaktanfragen scheitern hart bis zum 1. des nächsten Monats (automatischer
+Rollover). Setze den Cap ~10% unter dein Volumen, damit IPRoyals Header-Overhead
+nicht knapp wird.
+
+Funktioniert mit Shifter, IPRoyal, Smartproxy, Bright Data — alle bieten
+HTTP-Backconnect-Gateways. Für niedriges Volumen sind PAYG-Anbieter wie IPRoyal
+oder Smartproxy meist günstiger als Shifters unlimited-Bandwidth-Pläne. Bei
+DE-Geo + Sticky-Session ist die Wahrscheinlichkeit für IS24-Captchas am
+geringsten — wie das im Username kodiert wird, steht in der Doku des
+jeweiligen Anbieters (z.B. `user-country-de-session-abc`).
+
+Wirkt sowohl beim Scrapen als auch beim Auto-Kontakt.
+
 ### IS24-Cookie holen
 
 1. Im Browser bei immobilienscout24.de **einloggen**.

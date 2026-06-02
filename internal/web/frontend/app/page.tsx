@@ -15,6 +15,8 @@ import {
   Pause,
   Home,
   CheckCircle2,
+  CheckCheck,
+  Lock,
   BellRing,
   Eye,
   Settings,
@@ -84,6 +86,13 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 
 // Helper to escape HTML if needed, though React handles escaping automatically
 const esc = (s?: string) => s || ""
@@ -101,7 +110,7 @@ interface TimingRanges {
 }
 
 interface Overview {
-  contact_mode: "off" | "test" | "on"
+  contact_mode: "off" | "test" | "approve" | "on"
   contact_label: string
   quiet_hours: boolean
   quiet_hours_start: string
@@ -142,16 +151,41 @@ interface CampaignCfg {
 
 interface Listing {
   id: number
+  is24_id?: string
   title: string
   url: string
   address?: string
   city?: string
+  district?: string
+  postal_code?: string
   price?: number
+  price_per_sqm?: number
   rooms?: number
   area?: number
+  has_balcony?: boolean
+  has_ebk?: boolean
+  has_elevator?: boolean
+  exclusive_expose?: boolean
+  build_year?: number
+  available_from?: string
+  description?: string
+  landlord_name?: string
+  contact_person?: string
+  search_profile_name?: string
   campaign?: string
   notified: boolean
   contacted: boolean
+  created_at: string
+}
+
+interface SentMessage {
+  id: number
+  listing_id: number
+  is24_id: string
+  message: string
+  status: string // pending | sent | failed | preview | pending_approval | rejected
+  error_msg?: string
+  sent_at: string
   created_at: string
 }
 
@@ -174,6 +208,37 @@ const EMPTY_OVERVIEW: Overview = {
     contact_action_delay_ms: { min: 100, max: 10000 },
   },
   exclude_furnished: true,
+}
+
+// DetailRow renders a label + value pair inside the listing detail drawer.
+// Label is muted small-caps; value falls back to "–" when empty.
+function DetailRow({ label, value }: { label: string; value?: string | number | null }) {
+  const display = value === undefined || value === null || value === "" ? "–" : String(value)
+  return (
+    <div className="flex justify-between gap-2 text-xs">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-semibold text-right">{display}</span>
+    </div>
+  )
+}
+
+// MessageStatusBadge maps a sent_messages.status value to a human label + tone.
+// Unknown statuses fall back to the raw string so we never silently hide data.
+function MessageStatusBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; tone: string }> = {
+    pending:           { label: "in Vorbereitung",  tone: STATUS_TONE.medium },
+    pending_approval:  { label: "wartet auf Approval", tone: STATUS_TONE.medium },
+    sent:              { label: "✅ gesendet",     tone: STATUS_TONE.active },
+    failed:            { label: "❌ Fehler",       tone: STATUS_TONE.quiet },
+    preview:           { label: "🧪 Vorschau",    tone: STATUS_TONE.subtle },
+    rejected:          { label: "❌ verworfen",   tone: STATUS_TONE.quiet },
+  }
+  const meta = map[status] ?? { label: status, tone: STATUS_TONE.subtle }
+  return (
+    <Badge variant="outline" className={`h-5 text-[10px] font-bold px-2 rounded-full ${meta.tone}`}>
+      {meta.label}
+    </Badge>
+  )
 }
 
 function sectionSubtitle(view: View, o: Overview): string {
@@ -258,6 +323,11 @@ export default function DashboardPage() {
   const [error, setError] = React.useState<string | null>(null)
   const [searchQuery, setSearchQuery] = React.useState("")
   
+  // Listing detail drawer — selected row + lazily-loaded message history.
+  const [selectedListing, setSelectedListing] = React.useState<Listing | null>(null)
+  const [listingMessages, setListingMessages] = React.useState<SentMessage[]>([])
+  const [loadingMessages, setLoadingMessages] = React.useState(false)
+
   // Add Profile form state
   const [isAddingProfile, setIsAddingProfile] = React.useState(false)
   const [newProfile, setNewProfile] = React.useState({
@@ -276,6 +346,29 @@ export default function DashboardPage() {
     }
     return r.status === 204 ? null : r.json()
   }, [])
+
+  // Lazy-load the sent_message history when the user opens a listing.
+  React.useEffect(() => {
+    if (!selectedListing) {
+      setListingMessages([])
+      return
+    }
+    let cancelled = false
+    setLoadingMessages(true)
+    api(`/api/listings/${selectedListing.id}/messages`)
+      .then((rows: SentMessage[]) => {
+        if (!cancelled) setListingMessages(rows ?? [])
+      })
+      .catch(() => {
+        if (!cancelled) setListingMessages([])
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingMessages(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedListing, api])
 
   // Load Data
   const loadData = React.useCallback(async (showIndicator = false) => {
@@ -583,7 +676,7 @@ export default function DashboardPage() {
             className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-semibold ${
               currentOverview.contact_mode === "on"
                 ? STATUS_TONE.active
-                : currentOverview.contact_mode === "test"
+                : currentOverview.contact_mode === "test" || currentOverview.contact_mode === "approve"
                 ? STATUS_TONE.medium
                 : STATUS_TONE.quiet
             }`}
@@ -593,7 +686,7 @@ export default function DashboardPage() {
               className={`h-1.5 w-1.5 rounded-full ${
                 currentOverview.contact_mode === "on"
                   ? "bg-background animate-ping dark:bg-background"
-                  : currentOverview.contact_mode === "test"
+                  : currentOverview.contact_mode === "test" || currentOverview.contact_mode === "approve"
                   ? "bg-foreground animate-pulse"
                   : "bg-muted-foreground"
               }`}
@@ -711,7 +804,7 @@ export default function DashboardPage() {
                 <label className="text-xs font-semibold text-muted-foreground">Kontakt-Modus</label>
                 <div className="flex w-full flex-col gap-3 rounded-lg border p-3 bg-muted/10 sm:flex-row sm:items-center sm:justify-between">
                   <span className="text-sm font-medium">Bewerbungen:</span>
-                  <div className="grid grid-cols-3 rounded-md border p-1 bg-muted/40 text-xs sm:inline-flex">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 rounded-md border p-1 bg-muted/40 text-xs sm:inline-flex">
                     <Button
                       variant={currentOverview.contact_mode === "off" ? "default" : "ghost"}
                       size="sm"
@@ -727,6 +820,14 @@ export default function DashboardPage() {
                       className="h-7 gap-1 px-3 text-xs font-medium rounded"
                     >
                       <Eye className="h-3 w-3" /> Test
+                    </Button>
+                    <Button
+                      variant={currentOverview.contact_mode === "approve" ? "default" : "ghost"}
+                      size="sm"
+                      onClick={() => setSetting({ contact_mode: "approve" })}
+                      className="h-7 gap-1 px-3 text-xs font-medium rounded"
+                    >
+                      <CheckCheck className="h-3 w-3" /> Approval
                     </Button>
                     <Button
                       variant={currentOverview.contact_mode === "on" ? "default" : "ghost"}
@@ -877,7 +978,7 @@ export default function DashboardPage() {
                     className={`text-xs px-2.5 py-1 ${
                       currentOverview.contact_mode === "on"
                         ? STATUS_TONE.active
-                        : currentOverview.contact_mode === "test"
+                        : currentOverview.contact_mode === "test" || currentOverview.contact_mode === "approve"
                         ? STATUS_TONE.medium
                         : STATUS_TONE.quiet
                     }`}
@@ -1315,7 +1416,11 @@ export default function DashboardPage() {
                 <TableBody>
                   {filteredListings.length > 0 ? (
                     filteredListings.map((l) => (
-                      <TableRow key={l.id} className="hover:bg-muted/10 transition-colors">
+                      <TableRow
+                        key={l.id}
+                        className="cursor-pointer hover:bg-muted/30 transition-colors"
+                        onClick={() => setSelectedListing(l)}
+                      >
                         <TableCell className="text-xs text-muted-foreground font-mono">
                           {formatDate(l.created_at)}
                         </TableCell>
@@ -1325,6 +1430,7 @@ export default function DashboardPage() {
                               href={l.url}
                               target="_blank"
                               rel="noreferrer"
+                              onClick={(e) => e.stopPropagation()}
                               className="font-semibold text-sm hover:text-primary hover:underline leading-tight inline-flex items-center gap-1 max-w-[450px] truncate"
                             >
                               {esc(l.title)} <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground/60" />
@@ -1353,6 +1459,15 @@ export default function DashboardPage() {
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="inline-flex flex-wrap gap-1.5 justify-end">
+                            {l.exclusive_expose && (
+                              <Badge
+                                variant="outline"
+                                className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.subtle}`}
+                                title="Nur für Suchen+ Mitglieder kontaktierbar"
+                              >
+                                <Lock className="h-3 w-3" /> Suchen+
+                              </Badge>
+                            )}
                             {l.notified && (
                               <Badge
                                 variant="outline"
@@ -1369,7 +1484,7 @@ export default function DashboardPage() {
                                 <CheckCircle2 className="h-3 w-3" /> kontaktiert
                               </Badge>
                             )}
-                            {!l.notified && !l.contacted && (
+                            {!l.notified && !l.contacted && !l.exclusive_expose && (
                               <span className="text-xs text-muted-foreground italic px-2">Kein Status</span>
                             )}
                           </div>
@@ -1389,6 +1504,128 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
         )}
+
+        {/* Listing detail drawer — opens on row click in the Wohnungen view. */}
+        <Sheet
+          open={selectedListing !== null}
+          onOpenChange={(open) => {
+            if (!open) setSelectedListing(null)
+          }}
+        >
+          <SheetContent side="right" className="overflow-y-auto">
+            {selectedListing && (
+              <>
+                <SheetHeader>
+                  <SheetTitle className="break-words">{selectedListing.title || "Wohnung"}</SheetTitle>
+                  <SheetDescription>
+                    {selectedListing.search_profile_name && (
+                      <>Profil: <span className="font-medium text-foreground">{selectedListing.search_profile_name}</span>{" · "}</>
+                    )}
+                    {selectedListing.campaign && <>Kampagne: {selectedListing.campaign}</>}
+                  </SheetDescription>
+                </SheetHeader>
+
+                <div className="space-y-4 text-xs">
+                  {/* Status row */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedListing.exclusive_expose && (
+                      <Badge variant="outline" className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.subtle}`}>
+                        <Lock className="h-3 w-3" /> Suchen+ exklusiv
+                      </Badge>
+                    )}
+                    {selectedListing.notified && (
+                      <Badge variant="outline" className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.medium}`}>
+                        <BellRing className="h-3 w-3" /> benachrichtigt
+                      </Badge>
+                    )}
+                    {selectedListing.contacted && (
+                      <Badge variant="outline" className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.active}`}>
+                        <CheckCircle2 className="h-3 w-3" /> kontaktiert
+                      </Badge>
+                    )}
+                  </div>
+
+                  {/* Suchen+ explanation banner */}
+                  {selectedListing.exclusive_expose && (
+                    <div className="rounded-md border border-amber-400/40 bg-amber-50 dark:bg-amber-950/30 p-3 text-xs leading-relaxed">
+                      <p className="font-semibold mb-1">Diese Anzeige ist Suchen+ exklusiv.</p>
+                      <p className="text-muted-foreground">
+                        IS24 versteckt das Kontaktformular hinter einer kostenpflichtigen Mitgliedschaft. Der Bot
+                        verschickt für diese Wohnung keine Nachricht. Du kannst sie nur direkt auf IS24 mit aktivem
+                        Suchen+ Abo kontaktieren.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Quick facts */}
+                  <div className="grid grid-cols-2 gap-2 rounded-md border p-3 bg-muted/20">
+                    <DetailRow label="Preis" value={selectedListing.price ? `${selectedListing.price.toLocaleString("de-DE")} €` : "–"} />
+                    <DetailRow label="m²" value={selectedListing.area ? `${selectedListing.area}` : "–"} />
+                    <DetailRow label="Zimmer" value={selectedListing.rooms ? `${selectedListing.rooms}` : "–"} />
+                    <DetailRow label="Baujahr" value={selectedListing.build_year ? `${selectedListing.build_year}` : "–"} />
+                    <DetailRow label="Balkon" value={selectedListing.has_balcony ? "ja" : "–"} />
+                    <DetailRow label="EBK" value={selectedListing.has_ebk ? "ja" : "–"} />
+                    <DetailRow label="Aufzug" value={selectedListing.has_elevator ? "ja" : "–"} />
+                    <DetailRow label="Ab" value={selectedListing.available_from || "–"} />
+                  </div>
+
+                  {/* Location */}
+                  <div className="rounded-md border p-3 bg-muted/10 space-y-1.5">
+                    <DetailRow label="Adresse" value={selectedListing.address || "–"} />
+                    <DetailRow label="PLZ / Stadt" value={[selectedListing.postal_code, selectedListing.city].filter(Boolean).join(" ") || "–"} />
+                    <DetailRow label="Stadtteil" value={selectedListing.district || "–"} />
+                    <DetailRow label="Ansprechpartner" value={selectedListing.contact_person || selectedListing.landlord_name || "–"} />
+                  </div>
+
+                  {/* Description */}
+                  {selectedListing.description && (
+                    <div className="rounded-md border p-3 bg-muted/10 space-y-1.5">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Beschreibung</div>
+                      <p className="whitespace-pre-wrap text-xs leading-relaxed">{selectedListing.description}</p>
+                    </div>
+                  )}
+
+                  {/* External link */}
+                  <a
+                    href={selectedListing.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                  >
+                    Auf IS24 ansehen <ExternalLink className="h-3 w-3" />
+                  </a>
+
+                  {/* Messages timeline */}
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Nachrichten</div>
+                    {loadingMessages ? (
+                      <div className="text-xs text-muted-foreground italic">lädt…</div>
+                    ) : listingMessages.length === 0 ? (
+                      <div className="text-xs text-muted-foreground italic">Noch keine Nachricht generiert.</div>
+                    ) : (
+                      <ul className="space-y-2">
+                        {listingMessages.map((m) => (
+                          <li key={m.id} className="rounded-md border p-3 bg-muted/10 space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <MessageStatusBadge status={m.status} />
+                              <span className="text-[10px] text-muted-foreground font-mono">
+                                {formatDate(m.sent_at || m.created_at)}
+                              </span>
+                            </div>
+                            <pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed font-sans text-foreground">{m.message}</pre>
+                            {m.error_msg && (
+                              <div className="text-[10px] text-red-600 dark:text-red-400 italic">{m.error_msg}</div>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </SheetContent>
+        </Sheet>
       </main>
     </div>
   )

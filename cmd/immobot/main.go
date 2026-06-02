@@ -115,8 +115,22 @@ func main() {
 	}
 
 	// Initialize IS24 browser client (uses chromedp to bypass WAF)
-	is24Client := is24.NewBrowserClient(cfg.IS24.Cookie, rateLimiter, cfg.Contact.ChromePath)
-	logger.Info("IS24 browser client initialized")
+	proxy := antidetect.Proxy{
+		URL:      cfg.IS24.Proxy.URL,
+		Username: cfg.IS24.Proxy.Username,
+		Password: cfg.IS24.Proxy.Password,
+	}
+	var bandwidth *antidetect.BandwidthGuard
+	if proxy.Enabled() {
+		bandwidth = antidetect.NewBandwidthGuard(cfg.IS24.Proxy.BandwidthCapMB, repo, logger)
+		logger.Info(bandwidth.Summary())
+	}
+	is24Client := is24.NewBrowserClient(cfg.IS24.Cookie, rateLimiter, cfg.Contact.ChromePath, proxy, bandwidth)
+	if proxy.Enabled() {
+		logger.Info("IS24 browser client initialized", "proxy", proxy.URL, "auth", proxy.RequiresAuth(), "cap_mb", cfg.IS24.Proxy.BandwidthCapMB)
+	} else {
+		logger.Info("IS24 browser client initialized")
+	}
 
 	// Initialize filter engine
 	filterEngine := filter.NewEngine()
@@ -175,6 +189,8 @@ func main() {
 			toContactProfile(cfg.Contact.Profile),
 			cfg.Contact.ChromePath,
 			humanBehavior,
+			proxy,
+			bandwidth,
 		)
 		logger.Info("auto-contact ready (controlled via Telegram)")
 	}
@@ -203,7 +219,11 @@ func main() {
 	// Connect shared controller state to scheduler
 	sched.SetAutoContactCallback(ctrl.IsAutoContactEnabled)
 	sched.SetTestModeCallback(ctrl.IsTestModeEnabled)
+	sched.SetApprovalModeCallback(ctrl.IsApprovalModeEnabled)
 	sched.SetQuietHoursCallback(ctrl.IsQuietHoursEnabled)
+
+	// Wire Telegram approval buttons → scheduler.OnApprove / OnReject.
+	botController.SetApprovalHandler(sched)
 	// Quiet-hours WINDOW (start/end) override from controller — falls back to
 	// cfg defaults inside the controller when no override is persisted.
 	sched.SetQuietWindowCallback(ctrl.IsWithinQuietHours)

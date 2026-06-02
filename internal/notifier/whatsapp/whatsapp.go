@@ -186,8 +186,8 @@ func (c *Client) NotifyContactSent(ctx context.Context, l *domain.Listing) error
 	if !c.enabled {
 		return nil
 	}
-	text := fmt.Sprintf("✅ *Kontaktanfrage gesendet*\n\n*%s*\n📍 %s\n🔗 %s",
-		l.Title, l.Address, l.URL)
+	text := fmt.Sprintf("✅ *Kontaktanfrage gesendet*%s\n\n*%s*\n📍 %s\n🔗 %s",
+		profileLine(l), l.Title, l.Address, l.URL)
 	return c.send(ctx, c.target, text)
 }
 
@@ -195,8 +195,8 @@ func (c *Client) NotifyContactFailed(ctx context.Context, l *domain.Listing, err
 	if !c.enabled {
 		return nil
 	}
-	text := fmt.Sprintf("❌ *Kontaktanfrage fehlgeschlagen*\n\n*%s*\n📍 %s\n🔗 %s\n\n*Fehler:* %s",
-		l.Title, l.Address, l.URL, errMsg)
+	text := fmt.Sprintf("❌ *Kontaktanfrage fehlgeschlagen*%s\n\n*%s*\n📍 %s\n🔗 %s\n\n*Fehler:* %s",
+		profileLine(l), l.Title, l.Address, l.URL, errMsg)
 	return c.send(ctx, c.target, text)
 }
 
@@ -207,12 +207,19 @@ func (c *Client) NotifyError(ctx context.Context, errMsg string) error {
 	return c.send(ctx, c.target, fmt.Sprintf("⚠️ *Bot-Fehler*\n\n%s", errMsg))
 }
 
+// NotifyApprovalRequest is a no-op on WhatsApp — the approval flow relies on
+// inline buttons, which WhatsApp doesn't support in this implementation. Users
+// should run approval mode through Telegram.
+func (c *Client) NotifyApprovalRequest(ctx context.Context, l *domain.Listing, message string, sentMessageID int64) error {
+	return nil
+}
+
 func (c *Client) NotifyMessagePreview(ctx context.Context, l *domain.Listing, message string) error {
 	if !c.enabled {
 		return nil
 	}
-	text := fmt.Sprintf("🧪 *Test-Modus: Nachricht-Vorschau*\n\n*Wohnung:* %s\n📍 %s\n💰 %d € | 🚪 %.1f Zimmer\n🔗 %s\n\n*━━━ Nachricht ━━━*\n\n%s",
-		l.Title, l.Address, l.Price, l.Rooms, l.URL, message)
+	text := fmt.Sprintf("🧪 *Test-Modus: Nachricht-Vorschau*%s\n\n*Wohnung:* %s\n📍 %s\n💰 %d € | 🚪 %.1f Zimmer\n🔗 %s\n\n*━━━ Nachricht ━━━*\n\n%s",
+		profileLine(l), l.Title, l.Address, l.Price, l.Rooms, l.URL, message)
 	return c.send(ctx, c.target, text)
 }
 
@@ -227,11 +234,21 @@ func (c *Client) IsEnabled() bool {
 	return c.enabled
 }
 
+// profileLine returns " (Profil: <name>)" when the listing has its profile
+// resolved, "" otherwise. Used to suffix headlines on the WhatsApp side.
+func profileLine(l *domain.Listing) string {
+	if l == nil || l.SearchProfileName == "" {
+		return ""
+	}
+	return fmt.Sprintf("\n_Profil: %s_", l.SearchProfileName)
+}
+
 // formatListing renders a listing in WhatsApp markup (*bold*, no HTML/buttons).
 func formatListing(l *domain.Listing) string {
 	var sb strings.Builder
-	sb.WriteString("🏠 *Neue Wohnung gefunden!*\n\n")
-	sb.WriteString(fmt.Sprintf("*%s*\n\n", l.Title))
+	sb.WriteString("🏠 *Neue Wohnung gefunden!*")
+	sb.WriteString(profileLine(l))
+	sb.WriteString(fmt.Sprintf("\n\n*%s*\n\n", l.Title))
 
 	switch {
 	case l.Address != "":

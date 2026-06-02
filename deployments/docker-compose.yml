@@ -20,6 +20,14 @@ services:
     # Shared memory for Chrome
     shm_size: 256mb
 
+    # Explicit DNS — the host runs systemd-resolved on 127.0.0.53, which is
+    # not reachable from the container's network namespace. Without this,
+    # Go's resolver inherits a broken resolv.conf and every DNS lookup fails
+    # (api.telegram.org, openai.com, IS24, etc.).
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+
     # Web dashboard — published to host loopback only.
     # On the host/VM: http://127.0.0.1:8080 (tunnel from your laptop via
     # ssh -L 8080:localhost:8080 user@vm). Requires WEB_ENABLED=true.
@@ -35,12 +43,14 @@ services:
     environment:
       - TZ=Europe/Berlin
       - LOG_LEVEL=info
+      - DEBUG_HTML=1
       # Set these via .env file or override
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-false}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - OPENAI_ENABLED=${OPENAI_ENABLED:-false}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - WHATSAPP_ENABLED=${WHATSAPP_ENABLED:-false}
       - WHATSAPP_TARGET_PHONE=${WHATSAPP_TARGET_PHONE:-}
       # Web dashboard: bind 0.0.0.0 inside the container so the published
@@ -48,6 +58,10 @@ services:
       - WEB_ENABLED=${WEB_ENABLED:-false}
       - WEB_ADDR=${WEB_ADDR:-0.0.0.0:8080}
       - IS24_COOKIE=${IS24_COOKIE:-}
+      - IS24_PROXY_URL=${IS24_PROXY_URL:-}
+      - IS24_PROXY_USER=${IS24_PROXY_USER:-}
+      - IS24_PROXY_PASS=${IS24_PROXY_PASS:-}
+      - IS24_PROXY_BANDWIDTH_CAP_MB=${IS24_PROXY_BANDWIDTH_CAP_MB:-0}
       - CONTACT_ENABLED=${CONTACT_ENABLED:-false}
       - CONTACT_FIRST_NAME=${CONTACT_FIRST_NAME:-}
       - CONTACT_LAST_NAME=${CONTACT_LAST_NAME:-}

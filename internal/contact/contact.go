@@ -41,15 +41,20 @@ type Submitter struct {
 	behavior   *antidetect.HumanBehavior
 	profile    Profile
 	chromePath string
+	proxy      antidetect.Proxy
+	bandwidth  *antidetect.BandwidthGuard
 }
 
-// NewSubmitter creates a new contact form submitter
-func NewSubmitter(cookie string, profile Profile, chromePath string, behavior *antidetect.HumanBehavior) *Submitter {
+// NewSubmitter creates a new contact form submitter. A nil bandwidth guard
+// disables tracking and the monthly cap.
+func NewSubmitter(cookie string, profile Profile, chromePath string, behavior *antidetect.HumanBehavior, proxy antidetect.Proxy, bandwidth *antidetect.BandwidthGuard) *Submitter {
 	return &Submitter{
 		cookie:     cookie,
 		behavior:   behavior,
 		profile:    profile,
 		chromePath: chromePath,
+		proxy:      proxy,
+		bandwidth:  bandwidth,
 	}
 }
 
@@ -58,6 +63,9 @@ func NewSubmitter(cookie string, profile Profile, chromePath string, behavior *a
 func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message string, profile Profile) error {
 	if profile == (Profile{}) {
 		profile = s.profile
+	}
+	if s.bandwidth != nil && !s.bandwidth.Allowed() {
+		return antidetect.ErrBandwidthExceeded
 	}
 	// Create browser context with options
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
@@ -73,11 +81,27 @@ func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message
 		opts = append(opts, chromedp.ExecPath(s.chromePath))
 	}
 
+	if s.proxy.Enabled() {
+		opts = append(opts, chromedp.ProxyServer(s.proxy.URL))
+	}
+
 	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer allocCancel()
 
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
 	defer browserCancel()
+
+	// Listener must be attached before fetch.Enable runs.
+	s.proxy.AttachAuthHandler(browserCtx)
+	var byteSnapshot func() int64
+	if s.bandwidth != nil {
+		byteSnapshot = antidetect.AttachByteCounter(browserCtx)
+		defer func() {
+			if byteSnapshot != nil {
+				s.bandwidth.Add(byteSnapshot())
+			}
+		}()
+	}
 
 	// Set timeout
 	browserCtx, cancel := context.WithTimeout(browserCtx, 2*time.Minute)
@@ -87,6 +111,21 @@ func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message
 	contactURL := listing.ContactFormURL
 	if contactURL == "" {
 		contactURL = fmt.Sprintf("https://www.immobilienscout24.de/expose/%s#/basicContact/email", listing.IS24ID)
+	}
+
+	// Pre-actions: enable Network domain (for byte counting) and Fetch (for
+	// proxy auth) before navigation so events fire / credentials are answered.
+	preActions := []chromedp.Action{}
+	if s.bandwidth != nil {
+		preActions = append(preActions, antidetect.NetworkEnable())
+	}
+	if a := s.proxy.EnableAction(); a != nil {
+		preActions = append(preActions, a)
+	}
+	if len(preActions) > 0 {
+		if err := chromedp.Run(browserCtx, preActions...); err != nil {
+			return fmt.Errorf("enable cdp domains: %w", err)
+		}
 	}
 
 	// Execute contact form submission

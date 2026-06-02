@@ -134,6 +134,14 @@ func (e *OpenAIEnhancer) buildPrompt(listing *domain.Listing) string {
 		features = append(features, fmt.Sprintf("%d m²", listing.Area))
 	}
 
+	// IS24 expose without photos → AI must not pretend to have seen them.
+	// We surface this as an explicit constraint in the prompt so phrasing like
+	// "die Bilder zeigen…" gets swapped for "laut der Beschreibung…".
+	sourcePhrasing := `Bezug auf die Inserats-Bilder ist erlaubt — z. B. "die Fotos zeigen", "auf den Bildern" — weil das Inserat Bilder hat.`
+	if len(listing.ImageURLs) == 0 {
+		sourcePhrasing = `Das Inserat hat KEINE Bilder. Beziehe dich daher AUSSCHLIESSLICH auf die Beschreibung — z. B. "laut der Beschreibung", "der Beschreibung nach". Erfinde keine sichtbaren Details, die nur auf Fotos zu sehen wären.`
+	}
+
 	return fmt.Sprintf(`
 Wohnungsinserat:
 - Titel: %s
@@ -141,13 +149,17 @@ Wohnungsinserat:
 - Features: %s
 - Beschreibung: %s
 
-Schreibe 1-2 kurze, authentische Sätze darüber, was an dieser Wohnung besonders ansprechend ist.
-Beispiel-Stil: "Die Bilder haben uns direkt angesprochen, besonders die hellen Räume und das schöne Parkett. Die Lage finden wir sehr ansprechend!"
+Schreibe 1-2 kurze, authentische Sätze darüber, was an dieser Wohnung
+besonders ansprechend ist.
 
 WICHTIG:
-- Nenne 2-3 konkrete Aspekte aus dem Inserat (z.B. helle Räume, schönes Parkett, toller Balkon, moderne Küche, etc.)
+- Nenne 2-3 konkrete Aspekte aus dem Inserat (z.B. helle Räume, schönes
+  Parkett, toller Balkon, moderne Küche, etc.)
+- %s
 - Erwähne KEINE Besichtigung - das kommt später im Text.
 - Sei enthusiastisch aber nicht übertrieben. Schreibe auf Deutsch.
+- Die Perspektive (ich vs. wir) und Tonalität sind im System-Prompt
+  vorgegeben — halte dich strikt daran.
 - Gib NUR die 1-2 Sätze zurück, keine Anführungszeichen, keine Erklärung.
 `,
 		listing.Title,
@@ -155,35 +167,32 @@ WICHTIG:
 		listing.City,
 		strings.Join(features, ", "),
 		truncate(listing.Description, 500),
+		sourcePhrasing,
 	)
 }
 
 func (e *OpenAIEnhancer) fallbackEnhance(message string, listing *domain.Listing) string {
-	// Generate generic but reasonable details
-	var details []string
-
-	if listing.HasBalcony {
-		details = append(details, "der Balkon")
+	// When OpenAI is unavailable we cannot honor the campaign's perspective
+	// (ich vs. wir) safely, and a wrong-perspective fallback ("Die Bilder haben
+	// uns direkt angesprochen…" in a single-person letter) is worse than no
+	// personalization at all. So emit a perspective-neutral one-liner that
+	// mentions one concrete feature when present, and degrade to silence
+	// otherwise — the surrounding template still reads fine.
+	var feature string
+	switch {
+	case listing.HasBalcony:
+		feature = "den Balkon"
+	case listing.HasEBK:
+		feature = "die Einbauküche"
+	case listing.Area > 0:
+		feature = fmt.Sprintf("die Wohnfläche von %d m²", listing.Area)
+	case listing.District != "":
+		feature = fmt.Sprintf("die Lage in %s", listing.District)
 	}
-	if listing.HasEBK {
-		details = append(details, "die Einbauküche")
-	}
-	if listing.Area > 0 {
-		details = append(details, fmt.Sprintf("die großzügige Wohnfläche von %d m²", listing.Area))
-	}
-	if listing.District != "" {
-		details = append(details, fmt.Sprintf("die Lage in %s", listing.District))
-	}
-
 	var personalizedDetails string
-	if len(details) >= 2 {
-		personalizedDetails = fmt.Sprintf("Die Bilder haben uns direkt angesprochen, besonders %s und %s.", details[0], details[1])
-	} else if len(details) == 1 {
-		personalizedDetails = fmt.Sprintf("Die Bilder haben uns direkt angesprochen, besonders %s.", details[0])
-	} else {
-		personalizedDetails = "Die Bilder haben uns direkt angesprochen und die Wohnung entspricht genau unseren Vorstellungen."
+	if feature != "" {
+		personalizedDetails = fmt.Sprintf("Besonders %s wirkt sehr ansprechend.", feature)
 	}
-
 	return strings.Replace(message, "{{.PersonalizedDetails}}", personalizedDetails, 1)
 }
 

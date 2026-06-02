@@ -67,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", fileServer)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/listings", s.handleListings)
+	mux.HandleFunc("GET /api/listings/{id}/messages", s.handleListingMessages)
 	mux.HandleFunc("GET /api/profiles", s.handleProfiles)
 	mux.HandleFunc("GET /api/campaigns", s.handleCampaigns)
 	mux.HandleFunc("POST /api/campaigns/{name}", s.handleSaveCampaign)
@@ -163,6 +164,25 @@ func (s *Server) handleListings(w http.ResponseWriter, r *http.Request) {
 		out = append(out, dto{Listing: &listings[i], Campaign: camp})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleListingMessages returns the full sent_message history for one listing
+// (oldest first). Powers the dashboard's detail drawer message timeline.
+func (s *Server) handleListingMessages(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid listing id"))
+		return
+	}
+	msgs, err := s.repo.GetSentMessagesByListing(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if msgs == nil {
+		msgs = []domain.SentMessage{}
+	}
+	writeJSON(w, http.StatusOK, msgs)
 }
 
 func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
@@ -270,7 +290,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if body.ContactMode != nil {
 		mode, ok := parseMode(*body.ContactMode)
 		if !ok {
-			writeErr(w, http.StatusBadRequest, errors.New("contact_mode must be off, test or on"))
+			writeErr(w, http.StatusBadRequest, errors.New("contact_mode must be off, test, approve or on"))
 			return
 		}
 		s.ctrl.SetContactMode(mode)
@@ -490,6 +510,8 @@ func modeString(m control.ContactMode) string {
 		return "off"
 	case control.ContactModeTest:
 		return "test"
+	case control.ContactModeApprove:
+		return "approve"
 	case control.ContactModeOn:
 		return "on"
 	}
@@ -502,6 +524,8 @@ func parseMode(s string) (control.ContactMode, bool) {
 		return control.ContactModeOff, true
 	case "test":
 		return control.ContactModeTest, true
+	case "approve":
+		return control.ContactModeApprove, true
 	case "on":
 		return control.ContactModeOn, true
 	}

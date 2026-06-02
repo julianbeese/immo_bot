@@ -69,7 +69,7 @@ func DefaultTemplate() string { return defaultTemplate }
 // Generate creates a message for a listing (without personalization)
 func (g *Generator) Generate(listing *domain.Listing) (string, error) {
 	data := TemplateData{
-		Title:               listing.Title,
+		Title:               sanitizeTitle(listing.Title),
 		Address:             listing.Address,
 		City:                listing.City,
 		District:            listing.District,
@@ -132,6 +132,23 @@ func lastNameOf(full string) string {
 		return ""
 	}
 	return tokens[len(tokens)-1]
+}
+
+// sanitizeTitle strips ad-attention characters (Markdown asterisks, hashtags,
+// excessive whitespace) that look fine in an IS24 search card but jarring in
+// a written letter. Empty input stays empty so the template's {{if .Title}}
+// branch can fall back to a neutral phrase.
+func sanitizeTitle(s string) string {
+	if s == "" {
+		return ""
+	}
+	// drop the most common attention-grabbers
+	for _, ch := range []string{"*", "#", "★", "✓", "✔", "❗", "❣", "!!"} {
+		s = strings.ReplaceAll(s, ch, "")
+	}
+	// collapse runs of whitespace + trim
+	s = strings.Join(strings.Fields(s), " ")
+	return strings.TrimSpace(s)
 }
 
 const defaultTemplate = `{{.Salutation}}

@@ -22,8 +22,9 @@ type Parser struct {
 // NewParser creates a new IS24 parser
 func NewParser() *Parser {
 	return &Parser{
-		// Match JSON-LD or embedded result list JSON
-		jsonRe:       regexp.MustCompile(`<script[^>]*type="application/(?:ld\+)?json"[^>]*>(.*?)</script>`),
+		// Match JSON-LD or embedded result list JSON. (?s) lets `.` cross
+		// newlines — IS24's JSON-LD is pretty-printed across many lines.
+		jsonRe:       regexp.MustCompile(`(?s)<script[^>]*type="application/(?:ld\+)?json"[^>]*>(.*?)</script>`),
 		priceRe:      regexp.MustCompile(`(\d+(?:\.\d+)?(?:,\d+)?)\s*€`),
 		roomsRe:      regexp.MustCompile(`(\d+(?:,\d+)?)\s*(?:Zimmer|Zi\.)`),
 		areaRe:       regexp.MustCompile(`(\d+(?:,\d+)?)\s*m²`),
@@ -280,19 +281,59 @@ func (p *Parser) parseHTMLResults(html string) []domain.Listing {
 func (p *Parser) extractJSONLD(html string) map[string]interface{} {
 	matches := p.jsonRe.FindAllStringSubmatch(html, -1)
 	for _, match := range matches {
-		if len(match) >= 2 {
-			var data map[string]interface{}
-			if err := json.Unmarshal([]byte(match[1]), &data); err == nil {
-				// Check if it's an Apartment/RealEstateListing type
-				if typ, ok := data["@type"].(string); ok {
-					if typ == "Apartment" || typ == "RealEstateListing" || typ == "Product" {
-						return data
-					}
-				}
-			}
+		if len(match) < 2 {
+			continue
+		}
+		var data map[string]interface{}
+		if err := json.Unmarshal([]byte(match[1]), &data); err != nil {
+			continue
+		}
+		if entry := findRealEstateNode(data); entry != nil {
+			return entry
 		}
 	}
 	return nil
+}
+
+// findRealEstateNode returns the listing node from a JSON-LD payload. IS24
+// wraps the listing in schema.org's @graph array (alongside BreadcrumbList /
+// WebPage nodes); older pages had the listing at the top level. We accept
+// both shapes and also tolerate @type being an array.
+func findRealEstateNode(data map[string]interface{}) map[string]interface{} {
+	if isRealEstateType(data["@type"]) {
+		return data
+	}
+	graph, ok := data["@graph"].([]interface{})
+	if !ok {
+		return nil
+	}
+	for _, item := range graph {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if isRealEstateType(entry["@type"]) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func isRealEstateType(t interface{}) bool {
+	match := func(s string) bool {
+		return s == "Apartment" || s == "RealEstateListing" || s == "Product"
+	}
+	switch v := t.(type) {
+	case string:
+		return match(v)
+	case []interface{}:
+		for _, x := range v {
+			if s, ok := x.(string); ok && match(s) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *Parser) populateFromJSONLD(listing *domain.Listing, data map[string]interface{}) {
@@ -363,15 +404,25 @@ func (p *Parser) extractExposeDetails(listing *domain.Listing, html string) {
 		}
 	}
 
-	// Extract rooms
+	// Rooms / area live in IS24.expose.mainCriteriaData — the JSON-LD node
+	// doesn't carry them. Fall back to the legacy is24qa-* CSS classes for
+	// pages that still expose them server-side.
+	if listing.Rooms == 0 || listing.Area == 0 {
+		if r, a := p.extractMainCriteria(html); r > 0 || a > 0 {
+			if listing.Rooms == 0 {
+				listing.Rooms = r
+			}
+			if listing.Area == 0 {
+				listing.Area = a
+			}
+		}
+	}
 	if listing.Rooms == 0 {
 		roomsPattern := regexp.MustCompile(`<div[^>]*class="[^"]*is24qa-zi[^"]*"[^>]*>([^<]+)</div>`)
 		if matches := roomsPattern.FindStringSubmatch(html); len(matches) > 1 {
 			listing.Rooms = parseRooms(matches[1])
 		}
 	}
-
-	// Extract area
 	if listing.Area == 0 {
 		areaPattern := regexp.MustCompile(`<div[^>]*class="[^"]*is24qa-wohnflaeche[^"]*"[^>]*>([^<]+)</div>`)
 		if matches := areaPattern.FindStringSubmatch(html); len(matches) > 1 {
@@ -379,18 +430,44 @@ func (p *Parser) extractExposeDetails(listing *domain.Listing, html string) {
 		}
 	}
 
-	// Extract features from criteria list
-	if strings.Contains(html, "is24qa-balkon-terrasse-ja") ||
-	   strings.Contains(strings.ToLower(html), "balkon: ja") {
+	// Boolean features (balcony, EBK, lift). booleanCriteriaData lists only
+	// the keys the listing HAS — absence means the flag is off, which is why
+	// we only flip these to true here, never to false.
+	flags := p.extractBooleanCriteria(html)
+	if flags["balcony"] {
 		listing.HasBalcony = true
 	}
-	if strings.Contains(html, "is24qa-einbaukueche-ja") ||
-	   strings.Contains(strings.ToLower(html), "einbauküche: ja") {
+	if flags["builtInKitchen"] {
 		listing.HasEBK = true
 	}
-	if strings.Contains(html, "is24qa-personenaufzug-ja") ||
-	   strings.Contains(strings.ToLower(html), "aufzug: ja") {
+	if flags["lift"] {
 		listing.HasElevator = true
+	}
+	// Legacy CSS-class fallbacks for older page layouts.
+	if !listing.HasBalcony && (strings.Contains(html, "is24qa-balkon-terrasse-ja") ||
+		strings.Contains(strings.ToLower(html), "balkon: ja")) {
+		listing.HasBalcony = true
+	}
+	if !listing.HasEBK && (strings.Contains(html, "is24qa-einbaukueche-ja") ||
+		strings.Contains(strings.ToLower(html), "einbauküche: ja")) {
+		listing.HasEBK = true
+	}
+	if !listing.HasElevator && (strings.Contains(html, "is24qa-personenaufzug-ja") ||
+		strings.Contains(strings.ToLower(html), "aufzug: ja")) {
+		listing.HasElevator = true
+	}
+
+	// Full Objektbeschreibung — the JSON-LD WebPage description is just a
+	// generated summary; the real text is in IS24.expose.objectDescription.
+	if listing.Description == "" {
+		listing.Description = p.extractObjectDescription(html)
+	}
+
+	// Suchen+ exclusive gate. When true, the contact form on IS24 is paywalled;
+	// our submit will fail. Captured here so the scheduler can skip submission
+	// and the dashboard can show a badge.
+	if m := exclusiveExposeRe.FindStringSubmatch(html); len(m) > 1 {
+		listing.ExclusiveExpose = m[1] == "true"
 	}
 
 	// Landlord (agency) name. The realtor-title class typically holds the
@@ -550,4 +627,89 @@ func parseArea(s string) int {
 	cleaned = strings.Replace(cleaned, ",", ".", 1)
 	f, _ := strconv.ParseFloat(cleaned, 64)
 	return int(f)
+}
+
+// IS24's expose HTML embeds the listing data as a JS object literal under
+// IS24.expose = {...}. Most fields we care about (rooms, area, features,
+// description) only live there — the JSON-LD <script> block has just
+// name/price/address. Below: targeted extractors for the sub-blobs that
+// happen to be valid JSON even though the outer object isn't.
+
+// mainCriteriaRe captures the "criteria" JSON array inside mainCriteriaData.
+// IS24 ships rooms and area in there as labelled entries — no nested arrays,
+// so `[^\]]+` is enough to bound the capture.
+var mainCriteriaRe = regexp.MustCompile(`"mainCriteriaData"\s*:\s*\{\s*"criteria"\s*:\s*(\[[^\]]+\])`)
+
+// booleanCriteriaRe captures the boolean criteria array. Each entry is a flag
+// the listing HAS (balcony, lift, cellar, builtInKitchen, …); absence means
+// the feature is not present on this listing.
+var booleanCriteriaRe = regexp.MustCompile(`"booleanCriteriaData"\s*:\s*\{\s*"criteria"\s*:\s*(\[[^\]]+\])`)
+
+// objectDescriptionRe captures the raw expose description. Tolerates escaped
+// quotes via the standard JSON string body pattern.
+var objectDescriptionRe = regexp.MustCompile(`"objectDescription"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+
+// exclusiveExposeRe matches IS24's flag for "Suchen+ exclusive" listings.
+// When true, clicking the Nachricht button on the live page redirects to a
+// paywall ("Diese Anzeige ist exklusiv für Mitglieder von Suchen+"), so the
+// contact form submit will fail for non-subscribers.
+var exclusiveExposeRe = regexp.MustCompile(`"exclusiveExpose"\s*:\s*(true|false)`)
+
+// extractMainCriteria pulls rooms and area from the IS24 mainCriteriaData
+// block. Returns zero values if the block is missing or malformed.
+func (p *Parser) extractMainCriteria(html string) (rooms float64, area int) {
+	m := mainCriteriaRe.FindStringSubmatch(html)
+	if len(m) < 2 {
+		return 0, 0
+	}
+	var entries []map[string]interface{}
+	if err := json.Unmarshal([]byte(m[1]), &entries); err != nil {
+		return 0, 0
+	}
+	for _, entry := range entries {
+		typ, _ := entry["type"].(string)
+		val, _ := entry["value"].(string)
+		switch typ {
+		case "NUMBER_OF_ROOMS":
+			rooms = parseRooms(val)
+		case "LIVING_SPACE":
+			area = parseArea(val)
+		}
+	}
+	return rooms, area
+}
+
+// extractBooleanCriteria returns the set of feature keys present in the
+// listing's booleanCriteriaData block (e.g. balcony, lift, builtInKitchen).
+func (p *Parser) extractBooleanCriteria(html string) map[string]bool {
+	keys := make(map[string]bool)
+	m := booleanCriteriaRe.FindStringSubmatch(html)
+	if len(m) < 2 {
+		return keys
+	}
+	var entries []map[string]interface{}
+	if err := json.Unmarshal([]byte(m[1]), &entries); err != nil {
+		return keys
+	}
+	for _, entry := range entries {
+		if k, ok := entry["key"].(string); ok && k != "" {
+			keys[k] = true
+		}
+	}
+	return keys
+}
+
+// extractObjectDescription returns the unescaped expose description text.
+// We unmarshal as a JSON string to get \n, \", and unicode escapes handled
+// correctly — string concatenation on the raw match would leave escapes in.
+func (p *Parser) extractObjectDescription(html string) string {
+	m := objectDescriptionRe.FindStringSubmatch(html)
+	if len(m) < 2 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal([]byte(`"`+m[1]+`"`), &s); err != nil {
+		return ""
+	}
+	return s
 }

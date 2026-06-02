@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ type Notifier interface {
 	NotifyContactFailed(ctx context.Context, l *domain.Listing, errMsg string) error
 	NotifyError(ctx context.Context, errMsg string) error
 	NotifyMessagePreview(ctx context.Context, l *domain.Listing, message string) error
+	NotifyApprovalRequest(ctx context.Context, l *domain.Listing, message string, sentMessageID int64) error
 	SendRawMessage(ctx context.Context, text string) error
 	IsEnabled() bool
 }
@@ -54,10 +56,19 @@ type Scheduler struct {
 	// Callbacks to check contact mode
 	isAutoContactEnabled func() bool
 	isTestModeEnabled    func() bool
+	isApprovalModeEnabled func() bool
 	isQuietHoursEnabled  func() *bool // nil = use config, non-nil = override
 	// Returns true if the given time falls inside the active quiet-hours
 	// window. When nil, the scheduler falls back to cfg.IsWithinQuietHours.
 	isWithinQuietHours func(time.Time) bool
+
+	// Returns the current poll interval. When nil, the scheduler uses
+	// cfg.PollInterval (static). Dashboard wires this to control.GetPollInterval
+	// so changes take effect on the next tick.
+	pollIntervalFn func() time.Duration
+	// Receives a ping whenever the poll interval changes; the run loop resets
+	// its timer. nil = no live updates (tests / no dashboard).
+	pollIntervalReset <-chan struct{}
 
 	mu      sync.Mutex
 	running bool
@@ -76,8 +87,12 @@ const cookieWarnThreshold = 3
 
 // MessageEnhancer enhances messages (OpenAI integration). campaignPrompt
 // overrides the enhancer's default system prompt per campaign.
+// ClassifyGender returns SalutationMale / SalutationFemale / SalutationUnknown
+// for an Ansprechpartner name; the scheduler caches the result on the listing
+// so the call only fires once per listing.
 type MessageEnhancer interface {
 	Enhance(ctx context.Context, message string, listing *domain.Listing, campaignPrompt string) (string, error)
+	ClassifyGender(ctx context.Context, name string) (string, error)
 }
 
 // Campaign is the resolved personalization bundle for one search strategy.
@@ -120,9 +135,10 @@ func NewScheduler(
 		enhancer:             enhancer,
 		contacter:            contacter,
 		logger:               logger,
-		isAutoContactEnabled: func() bool { return false }, // Default: observation mode
-		isTestModeEnabled:    func() bool { return false },
-		isQuietHoursEnabled:  func() *bool { return nil }, // nil = use config
+		isAutoContactEnabled:  func() bool { return false }, // Default: observation mode
+		isTestModeEnabled:     func() bool { return false },
+		isApprovalModeEnabled: func() bool { return false },
+		isQuietHoursEnabled:   func() *bool { return nil }, // nil = use config
 	}
 }
 
@@ -140,6 +156,12 @@ func (s *Scheduler) SetTestModeCallback(fn func() bool) {
 	s.isTestModeEnabled = fn
 }
 
+// SetApprovalModeCallback sets the callback to check if approval mode is enabled
+// (per-listing confirmation via Telegram inline buttons).
+func (s *Scheduler) SetApprovalModeCallback(fn func() bool) {
+	s.isApprovalModeEnabled = fn
+}
+
 // SetQuietHoursCallback sets the callback to check if quiet hours override is set
 func (s *Scheduler) SetQuietHoursCallback(fn func() *bool) {
 	s.isQuietHoursEnabled = fn
@@ -150,6 +172,28 @@ func (s *Scheduler) SetQuietHoursCallback(fn func() *bool) {
 // the start/end times can be changed at runtime (e.g. via the dashboard).
 func (s *Scheduler) SetQuietWindowCallback(fn func(time.Time) bool) {
 	s.isWithinQuietHours = fn
+}
+
+// SetPollIntervalSource wires a dynamic poll-interval source. fn is called
+// before each timer reset; reset is pinged when the value changes so the
+// current sleep can be cut short. Either may be nil for a static interval.
+func (s *Scheduler) SetPollIntervalSource(fn func() time.Duration, reset <-chan struct{}) {
+	s.pollIntervalFn = fn
+	s.pollIntervalReset = reset
+}
+
+// currentPollInterval returns the live interval (callback when set, else
+// config fallback). Always > 0 to keep the timer healthy.
+func (s *Scheduler) currentPollInterval() time.Duration {
+	if s.pollIntervalFn != nil {
+		if d := s.pollIntervalFn(); d > 0 {
+			return d
+		}
+	}
+	if s.cfg.PollInterval > 0 {
+		return s.cfg.PollInterval
+	}
+	return 5 * time.Minute
 }
 
 // SetIS24Cookie hot-reloads the IS24 cookie: applies it to the client (so the
@@ -226,8 +270,11 @@ func (s *Scheduler) run(ctx context.Context) {
 		s.notifyError(ctx, err)
 	}
 
-	ticker := time.NewTicker(s.cfg.PollInterval)
-	defer ticker.Stop()
+	// Timer-based loop instead of a fixed-duration ticker, so the dashboard can
+	// change the poll interval at runtime. The reset channel cuts the current
+	// sleep short the moment the new value is set.
+	timer := time.NewTimer(s.currentPollInterval())
+	defer timer.Stop()
 
 	for {
 		select {
@@ -235,11 +282,23 @@ func (s *Scheduler) run(ctx context.Context) {
 			return
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-s.pollIntervalReset:
+			// Setting changed mid-sleep — start over with the new value.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			d := s.currentPollInterval()
+			s.logger.Info("poll interval changed, resetting timer", "interval", d)
+			timer.Reset(d)
+		case <-timer.C:
 			if err := s.poll(ctx); err != nil {
 				s.logger.Error("poll failed", "error", err)
 				s.notifyError(ctx, err)
 			}
+			timer.Reset(s.currentPollInterval())
 		}
 	}
 }
@@ -293,6 +352,14 @@ func (s *Scheduler) poll(ctx context.Context) error {
 			s.logger.Info("test mode enabled, showing message previews")
 			if err := s.sendTestPreviews(ctx); err != nil {
 				s.logger.Error("test preview failed", "error", err)
+			}
+		}
+
+		// Process approval mode: suggest one listing at a time and wait for
+		// user confirmation via Telegram inline buttons.
+		if s.cfg.Contact.Enabled && s.isApprovalModeEnabled() {
+			if err := s.sendApprovalRequests(ctx); err != nil {
+				s.logger.Error("approval request failed", "error", err)
 			}
 		}
 	}
@@ -416,6 +483,21 @@ func (s *Scheduler) processProfile(ctx context.Context, profile *domain.SearchPr
 			detailed.SearchProfileID = listing.SearchProfileID
 		}
 
+		// Guard: don't persist a listing without expose data. The AI enhancer
+		// would otherwise hallucinate features (Parkett, moderne Küche, …)
+		// out of an empty prompt. Description only populates from a successful
+		// expose parse, so it's the clearest "we actually have data" signal —
+		// search-result-only fallbacks land here. The listing stays unsaved,
+		// so the next polling cycle will retry the fetch (WAF challenges are
+		// transient).
+		if strings.TrimSpace(detailed.Description) == "" {
+			s.logger.Warn("listing skipped: no expose data",
+				"is24_id", listing.IS24ID,
+				"title", detailed.Title,
+				"reason", "empty description after fetch — likely WAF or parser miss")
+			continue
+		}
+
 		// Re-filter with full details
 		if !s.filter.Filter(detailed, profile).Passed {
 			s.logger.Debug("listing filtered after detail fetch", "is24_id", listing.IS24ID)
@@ -513,6 +595,34 @@ func (s *Scheduler) applyCampaignOverrides(ctx context.Context, camp Campaign) C
 	return camp
 }
 
+// ensureSalutation classifies the listing's Ansprechpartner gender via OpenAI
+// once and caches the result in the DB. No-op when the listing has no contact
+// person or already has a cached salutation. Errors are logged and the
+// listing's salutation stays unknown (template falls back to "Sehr geehrte
+// Damen und Herren,"). Always returns the resolved listing state so callers
+// can render the message right away.
+func (s *Scheduler) ensureSalutation(ctx context.Context, listing *domain.Listing) {
+	if listing.ContactPerson == "" || listing.ContactSalutation != "" {
+		return
+	}
+	if s.enhancer == nil {
+		return
+	}
+	gender, err := s.enhancer.ClassifyGender(ctx, listing.ContactPerson)
+	if err != nil {
+		s.logger.Warn("gender classification failed",
+			"is24_id", listing.IS24ID,
+			"contact_person", listing.ContactPerson,
+			"error", err)
+		gender = domain.SalutationUnknown
+	}
+	listing.ContactSalutation = gender
+	if err := s.repo.UpdateListingContact(ctx, listing.ID, listing.ContactPerson, gender); err != nil {
+		s.logger.Warn("failed to cache contact salutation",
+			"id", listing.ID, "error", err)
+	}
+}
+
 func (s *Scheduler) sendContacts(ctx context.Context) error {
 	if s.contacter == nil {
 		return nil
@@ -524,7 +634,19 @@ func (s *Scheduler) sendContacts(ctx context.Context) error {
 	}
 
 	for _, listing := range listings {
+		if !s.isReachable(&listing) {
+			s.logger.Info("auto-contact skipped: exclusive expose (Suchen+ paywall)",
+				"is24_id", listing.IS24ID, "title", listing.Title)
+			if err := s.repo.MarkListingContacted(ctx, listing.ID); err != nil {
+				s.logger.Warn("failed to mark exclusive listing contacted", "id", listing.ID, "error", err)
+			}
+			continue
+		}
 		camp := s.campaignFor(ctx, &listing)
+
+		// Classify Ansprechpartner gender (cached) so the template renders the
+		// personalized salutation. Falls back silently to gender-neutral.
+		s.ensureSalutation(ctx, &listing)
 
 		// Generate message
 		message, err := camp.Generator.Generate(&listing)
@@ -601,6 +723,10 @@ func (s *Scheduler) sendTestPreviews(ctx context.Context) error {
 	for _, listing := range listings {
 		camp := s.campaignFor(ctx, &listing)
 
+		// Classify Ansprechpartner gender (cached) so the template renders the
+		// personalized salutation. Falls back silently to gender-neutral.
+		s.ensureSalutation(ctx, &listing)
+
 		// Generate message
 		message, err := camp.Generator.Generate(&listing)
 		if err != nil {
@@ -651,4 +777,167 @@ func (s *Scheduler) notifyError(ctx context.Context, err error) {
 	if s.notifier != nil {
 		s.notifier.NotifyError(ctx, err.Error())
 	}
+}
+
+// approvalRejectCooldown is the minimum age of a rejection before the same
+// listing becomes eligible for a new approval suggestion. Keeps the bot from
+// re-proposing the same listing immediately after ❌, but doesn't trap the
+// listing forever — useful when the user wants a regenerated message later.
+const approvalRejectCooldown = 6 * time.Hour
+
+// sendApprovalRequests proposes the next eligible listing in approval mode.
+// Strict sequential: skip the cycle if any pending_approval is in flight.
+func (s *Scheduler) sendApprovalRequests(ctx context.Context) error {
+	pending, err := s.repo.CountPendingApprovals(ctx)
+	if err != nil {
+		return fmt.Errorf("count pending approvals: %w", err)
+	}
+	if pending > 0 {
+		s.logger.Debug("approval in flight, skipping", "pending", pending)
+		return nil
+	}
+
+	listing, err := s.repo.GetNextApprovableListing(ctx, approvalRejectCooldown)
+	if err != nil {
+		return fmt.Errorf("next approvable: %w", err)
+	}
+	if listing == nil {
+		return nil // queue empty
+	}
+	if !s.isReachable(listing) {
+		// Listing is Suchen+-exclusive — can't actually message. Mark contacted
+		// so it leaves the queue and the user isn't pestered with an unactionable
+		// approval card.
+		s.logger.Info("approval skipped: exclusive expose (Suchen+ paywall)",
+			"is24_id", listing.IS24ID, "title", listing.Title)
+		if err := s.repo.MarkListingContacted(ctx, listing.ID); err != nil {
+			s.logger.Warn("failed to mark exclusive listing contacted", "id", listing.ID, "error", err)
+		}
+		return nil
+	}
+
+	camp := s.campaignFor(ctx, listing)
+	s.ensureSalutation(ctx, listing)
+
+	message, err := camp.Generator.Generate(listing)
+	if err != nil {
+		return fmt.Errorf("generate message for %s: %w", listing.IS24ID, err)
+	}
+	if s.enhancer != nil {
+		if enhanced, err := s.enhancer.Enhance(ctx, message, listing, camp.AIPrompt); err == nil {
+			message = enhanced
+		} else {
+			s.logger.Warn("message enhancement failed, using base message", "error", err)
+		}
+	}
+
+	sentMsg := &domain.SentMessage{
+		ListingID: listing.ID,
+		IS24ID:    listing.IS24ID,
+		Message:   message,
+		Status:    domain.MessageStatusPendingApproval,
+	}
+	if err := s.repo.CreateSentMessage(ctx, sentMsg); err != nil {
+		return fmt.Errorf("record pending approval: %w", err)
+	}
+
+	if err := s.notifier.NotifyApprovalRequest(ctx, listing, message, sentMsg.ID); err != nil {
+		// Roll back the pending row so the listing comes back next cycle —
+		// otherwise a transient Telegram failure would lock the queue forever.
+		_ = s.repo.UpdateSentMessageStatus(ctx, sentMsg.ID, domain.MessageStatusFailed, err.Error())
+		return fmt.Errorf("send approval request: %w", err)
+	}
+
+	s.logger.Info("approval request sent",
+		"is24_id", listing.IS24ID, "sent_message_id", sentMsg.ID, "title", listing.Title)
+	return nil
+}
+
+// isReachable reports whether the listing is contactable at all. IS24's
+// "Suchen+ exclusive" listings paywall the contact form behind a subscription
+// — submitting against them will just dump us on a Plus landing page. We
+// never auto-send or auto-suggest such listings; the user can still see them
+// in the dashboard with the paywalled badge.
+func (s *Scheduler) isReachable(l *domain.Listing) bool {
+	return !l.ExclusiveExpose
+}
+
+// OnApprove fulfils an approval: looks up the pending sent_message, submits
+// the contact form, updates statuses, and notifies the user of the outcome.
+// Safe to call multiple times — only the first call for a given pending row
+// will trigger the contact submit; subsequent calls are no-ops.
+func (s *Scheduler) OnApprove(ctx context.Context, sentMessageID int64) error {
+	sm, err := s.repo.GetSentMessage(ctx, sentMessageID)
+	if err != nil {
+		return fmt.Errorf("load sent message: %w", err)
+	}
+	if sm == nil {
+		return fmt.Errorf("sent message %d not found", sentMessageID)
+	}
+	if sm.Status != domain.MessageStatusPendingApproval {
+		s.logger.Info("approve ignored, not pending", "sent_message_id", sentMessageID, "status", sm.Status)
+		return nil
+	}
+
+	listing, err := s.repo.GetListingByID(ctx, sm.ListingID)
+	if err != nil {
+		return fmt.Errorf("load listing: %w", err)
+	}
+	if listing == nil {
+		return fmt.Errorf("listing %d not found", sm.ListingID)
+	}
+
+	if s.contacter == nil {
+		return fmt.Errorf("contact submitter not configured — approval mode requires CONTACT_ENABLED=true")
+	}
+
+	camp := s.campaignFor(ctx, listing)
+
+	// Mark in-flight before the submit so a duplicate click can't double-send.
+	if err := s.repo.UpdateSentMessageStatus(ctx, sm.ID, domain.MessageStatusPending, ""); err != nil {
+		return fmt.Errorf("mark pending: %w", err)
+	}
+
+	if err := s.contacter.Submit(ctx, listing, sm.Message, camp.Contact); err != nil {
+		s.repo.UpdateSentMessageStatus(ctx, sm.ID, domain.MessageStatusFailed, err.Error())
+		s.notifier.NotifyContactFailed(ctx, listing, err.Error())
+		s.repo.LogActivity(ctx, &domain.ActivityLog{
+			Action: domain.ActionContactFailed, EntityType: "listing",
+			EntityID: listing.ID, ErrorMsg: err.Error(),
+		})
+		return err
+	}
+
+	if err := s.repo.MarkListingContacted(ctx, listing.ID); err != nil {
+		s.logger.Error("mark contacted failed", "id", listing.ID, "error", err)
+	}
+	s.repo.UpdateSentMessageStatus(ctx, sm.ID, domain.MessageStatusSent, "")
+	s.notifier.NotifyContactSent(ctx, listing)
+	s.repo.LogActivity(ctx, &domain.ActivityLog{
+		Action: domain.ActionContactSent, EntityType: "listing", EntityID: listing.ID,
+	})
+	s.logger.Info("approval -> contact sent", "is24_id", listing.IS24ID)
+	return nil
+}
+
+// OnReject marks the approval as rejected. The listing stays in the queue but
+// becomes eligible again only after approvalRejectCooldown — so the bot won't
+// immediately re-propose the same listing on the very next poll.
+func (s *Scheduler) OnReject(ctx context.Context, sentMessageID int64) error {
+	sm, err := s.repo.GetSentMessage(ctx, sentMessageID)
+	if err != nil {
+		return fmt.Errorf("load sent message: %w", err)
+	}
+	if sm == nil {
+		return fmt.Errorf("sent message %d not found", sentMessageID)
+	}
+	if sm.Status != domain.MessageStatusPendingApproval {
+		s.logger.Info("reject ignored, not pending", "sent_message_id", sentMessageID, "status", sm.Status)
+		return nil
+	}
+	if err := s.repo.UpdateSentMessageStatus(ctx, sm.ID, domain.MessageStatusRejected, ""); err != nil {
+		return err
+	}
+	s.logger.Info("approval rejected", "sent_message_id", sentMessageID, "is24_id", sm.IS24ID)
+	return nil
 }

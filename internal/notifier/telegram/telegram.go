@@ -76,11 +76,16 @@ func (n *Notifier) NotifyContactSent(ctx context.Context, listing *domain.Listin
 		return nil
 	}
 
+	profileLine := ""
+	if listing.SearchProfileName != "" {
+		profileLine = fmt.Sprintf("<i>Profil: %s</i>\n", escapeHTML(listing.SearchProfileName))
+	}
 	text := fmt.Sprintf(
-		"✅ <b>Kontaktanfrage gesendet</b>\n\n"+
+		"✅ <b>Kontaktanfrage gesendet</b>\n%s\n"+
 			"<b>%s</b>\n"+
 			"📍 %s\n"+
 			"🔗 %s",
+		profileLine,
 		escapeHTML(listing.Title),
 		escapeHTML(listing.Address),
 		listing.URL,
@@ -99,12 +104,17 @@ func (n *Notifier) NotifyContactFailed(ctx context.Context, listing *domain.List
 		return nil
 	}
 
+	profileLine := ""
+	if listing.SearchProfileName != "" {
+		profileLine = fmt.Sprintf("<i>Profil: %s</i>\n", escapeHTML(listing.SearchProfileName))
+	}
 	text := fmt.Sprintf(
-		"❌ <b>Kontaktanfrage fehlgeschlagen</b>\n\n"+
+		"❌ <b>Kontaktanfrage fehlgeschlagen</b>\n%s\n"+
 			"<b>%s</b>\n"+
 			"📍 %s\n"+
 			"🔗 %s\n\n"+
 			"<b>Fehler:</b> %s",
+		profileLine,
 		escapeHTML(listing.Title),
 		escapeHTML(listing.Address),
 		listing.URL,
@@ -156,8 +166,11 @@ func (n *Notifier) NotifyStartup(ctx context.Context, profileCount int) error {
 func (n *Notifier) formatListing(l *domain.Listing) string {
 	var sb strings.Builder
 
-	sb.WriteString("🏠 <b>Neue Wohnung gefunden!</b>\n\n")
-	sb.WriteString(fmt.Sprintf("<b>%s</b>\n\n", escapeHTML(l.Title)))
+	sb.WriteString("🏠 <b>Neue Wohnung gefunden!</b>\n")
+	if l.SearchProfileName != "" {
+		sb.WriteString(fmt.Sprintf("<i>Profil: %s</i>\n", escapeHTML(l.SearchProfileName)))
+	}
+	sb.WriteString(fmt.Sprintf("\n<b>%s</b>\n\n", escapeHTML(l.Title)))
 
 	// Location
 	if l.Address != "" {
@@ -209,6 +222,9 @@ func (n *Notifier) formatListing(l *domain.Listing) string {
 		}
 		sb.WriteString("\n")
 	}
+	if l.ContactPerson != "" {
+		sb.WriteString(fmt.Sprintf("📇 %s\n", escapeHTML(l.ContactPerson)))
+	}
 
 	return sb.String()
 }
@@ -240,20 +256,71 @@ func (n *Notifier) SendRawMessage(ctx context.Context, text string) error {
 	return err
 }
 
+// NotifyApprovalRequest sends an approval request card with inline ✅/❌
+// buttons. The callback_data is `approve:<sentMessageID>` / `reject:<id>` —
+// the BotController's update loop parses that and dispatches to the scheduler.
+func (n *Notifier) NotifyApprovalRequest(ctx context.Context, listing *domain.Listing, message string, sentMessageID int64) error {
+	if !n.enabled {
+		return nil
+	}
+
+	header := "🛂 <b>Approval — neue Wohnung</b>"
+	if listing.SearchProfileName != "" {
+		header += fmt.Sprintf("\n<i>Profil: %s</i>", escapeHTML(listing.SearchProfileName))
+	}
+	text := fmt.Sprintf(
+		"%s\n\n"+
+			"<b>%s</b>\n"+
+			"📍 %s\n"+
+			"💰 %d € | 🚪 %.1f Zimmer | 📐 %d m²\n\n"+
+			"<b>━━━ Nachricht ━━━</b>\n\n"+
+			"<pre>%s</pre>",
+		header,
+		escapeHTML(listing.Title),
+		escapeHTML(listing.Address),
+		listing.Price,
+		listing.Rooms,
+		listing.Area,
+		escapeHTML(message),
+	)
+
+	msg := tgbotapi.NewMessage(n.chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Senden", fmt.Sprintf("approve:%d", sentMessageID)),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Verwerfen", fmt.Sprintf("reject:%d", sentMessageID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("🔗 Auf IS24 ansehen", listing.URL),
+		),
+	)
+	msg.ReplyMarkup = keyboard
+
+	_, err := n.bot.Send(msg)
+	return err
+}
+
 // NotifyMessagePreview sends a preview of the message that would be sent to a listing
 func (n *Notifier) NotifyMessagePreview(ctx context.Context, listing *domain.Listing, message string) error {
 	if !n.enabled {
 		return nil
 	}
 
+	header := "🧪 <b>Test-Modus: Nachricht-Vorschau</b>"
+	if listing.SearchProfileName != "" {
+		header += fmt.Sprintf("\n<i>Profil: %s</i>", escapeHTML(listing.SearchProfileName))
+	}
 	text := fmt.Sprintf(
-		"🧪 <b>Test-Modus: Nachricht-Vorschau</b>\n\n"+
+		"%s\n\n"+
 			"<b>Wohnung:</b> %s\n"+
 			"📍 %s\n"+
 			"💰 %d € | 🚪 %.1f Zimmer\n"+
 			"🔗 %s\n\n"+
 			"<b>━━━ Nachricht ━━━</b>\n\n"+
 			"<pre>%s</pre>",
+		header,
 		escapeHTML(listing.Title),
 		escapeHTML(listing.Address),
 		listing.Price,

@@ -6,12 +6,50 @@ import (
 	"github.com/julianbeese/immo_bot/internal/domain"
 )
 
-// Engine applies search profile filters to listings
-type Engine struct{}
+// Engine applies search profile filters to listings.
+//
+// ExcludeFurnishedFn (optional) is consulted per-listing to decide whether
+// the built-in furnished blocklist should apply. nil = always exclude
+// (safe default for the bot's main use case: long-term rentals).
+type Engine struct {
+	ExcludeFurnishedFn func() bool
+}
 
 // NewEngine creates a new filter engine
 func NewEngine() *Engine {
 	return &Engine{}
+}
+
+// FurnishedKeywords are matched (case-insensitive substring) against title +
+// description. IS24 has no native "unmöbliert"-filter, so the bot does it
+// itself. Substring matching catches inflected forms ("möblierter Wohnraum",
+// "Möblierte 2-Zi-Wohnung"). Common false-positive guard: "unmöbliert" /
+// "nicht möbliert" / "möbliert: nein" are checked first and short-circuit.
+var FurnishedKeywords = []string{
+	"möbliert",
+	"möbliertes",
+	"möblierter",
+	"möblierte",
+	"möbl.",
+	"teilmöbliert",
+	"teil möbliert",
+	"vollmöbliert",
+	"voll möbliert",
+	"furnished",
+	"fully furnished",
+}
+
+// FurnishedNegations short-circuit the furnished filter: if the listing
+// explicitly states it is NOT furnished, the substring match against
+// FurnishedKeywords would still trigger ("möbliert" appears in "unmöbliert"
+// after lowercase). These mark the listing as safe.
+var FurnishedNegations = []string{
+	"unmöbliert",
+	"nicht möbliert",
+	"ohne möbel",
+	"möbliert: nein",
+	"möbliert : nein",
+	"unfurnished",
 }
 
 // FilterResult contains filtering outcome for a listing
@@ -42,6 +80,7 @@ func (e *Engine) Filter(listing *domain.Listing, profile *domain.SearchProfile) 
 		},
 		&BuildYearMatcher{MinYear: profile.MinBuildYear, MaxYear: profile.MaxBuildYear},
 		&KeywordExclusionMatcher{Keywords: profile.ExcludeKeywords},
+		&FurnishedMatcher{Enabled: e.excludeFurnishedEnabled()},
 	}
 
 	for _, matcher := range matchers {
@@ -235,6 +274,44 @@ func (m *KeywordExclusionMatcher) Match(l *domain.Listing) string {
 	for _, keyword := range m.Keywords {
 		if strings.Contains(text, strings.ToLower(keyword)) {
 			return "excluded_keyword:" + keyword
+		}
+	}
+	return ""
+}
+
+// excludeFurnishedEnabled is the controller-backed live setting.
+// nil callback (zero-value Engine) means "always exclude" — safe default for
+// the bot's main use case of long-term rentals.
+func (e *Engine) excludeFurnishedEnabled() bool {
+	if e.ExcludeFurnishedFn == nil {
+		return true
+	}
+	return e.ExcludeFurnishedFn()
+}
+
+// FurnishedMatcher filters out listings that look furnished (möbliert /
+// furnished) when enabled. IS24's search has no native "unmöbliert"-filter,
+// so the bot does it itself by scanning title + description.
+type FurnishedMatcher struct {
+	Enabled bool
+}
+
+func (m *FurnishedMatcher) Match(l *domain.Listing) string {
+	if !m.Enabled {
+		return ""
+	}
+	text := strings.ToLower(l.Title + "\n" + l.Description)
+
+	// Honor explicit negations first so listings stating "unmöbliert" / "ohne
+	// Möbel" aren't caught by the substring match against "möbliert".
+	for _, neg := range FurnishedNegations {
+		if strings.Contains(text, neg) {
+			return ""
+		}
+	}
+	for _, kw := range FurnishedKeywords {
+		if strings.Contains(text, kw) {
+			return "furnished:" + kw
 		}
 	}
 	return ""

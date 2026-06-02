@@ -23,9 +23,10 @@ import (
 type ContactMode int
 
 const (
-	ContactModeOff  ContactMode = iota // Observation only
-	ContactModeTest                    // Show message preview, don't send
-	ContactModeOn                      // Actually send contacts
+	ContactModeOff     ContactMode = iota // Observation only
+	ContactModeTest                       // Show message preview, don't send
+	ContactModeApprove                    // Suggest one at a time, send on user approval
+	ContactModeOn                         // Actually send contacts
 )
 
 // SettingsStore is the minimal persistence surface the controller needs.
@@ -37,10 +38,25 @@ type SettingsStore interface {
 
 // Meta keys under which settings are persisted in the sqlite meta table.
 const (
-	MetaContactMode       = "settings.contact_mode"
-	MetaQuietHoursEnabled = "settings.quiet_hours_enabled"
-	MetaQuietHoursStart   = "settings.quiet_hours_start"
-	MetaQuietHoursEnd     = "settings.quiet_hours_end"
+	MetaContactMode         = "settings.contact_mode"
+	MetaQuietHoursEnabled   = "settings.quiet_hours_enabled"
+	MetaQuietHoursStart     = "settings.quiet_hours_start"
+	MetaQuietHoursEnd       = "settings.quiet_hours_end"
+	MetaPollIntervalSeconds = "settings.poll_interval_seconds"
+	MetaContactTypeDelayMs  = "settings.contact_type_delay_ms"
+	MetaContactActionDelayMs = "settings.contact_action_delay_ms"
+	MetaExcludeFurnished    = "settings.exclude_furnished"
+)
+
+// Allowed ranges for dashboard-tunable timing knobs. Min values exist to keep
+// the bot from hammering IS24 or behaving like an obvious bot during contact.
+const (
+	MinPollInterval        = 60 * time.Second
+	MaxPollInterval        = 30 * time.Minute
+	MinContactTypeDelay    = 10 * time.Millisecond
+	MaxContactTypeDelay    = 500 * time.Millisecond
+	MinContactActionDelay  = 100 * time.Millisecond
+	MaxContactActionDelay  = 10 * time.Second
 )
 
 // Defaults bundles the start-of-day values used when nothing is persisted yet.
@@ -50,6 +66,12 @@ type Defaults struct {
 	QuietHoursStart   string // "HH:MM"
 	QuietHoursEnd     string // "HH:MM"
 	Timezone          string // IANA tz, e.g. "Europe/Berlin"
+
+	// Timing defaults — used when nothing is persisted yet. Zero falls back to
+	// hard-coded fallbacks (5m / 50ms / 1s) so older callers stay compatible.
+	PollInterval       time.Duration
+	ContactTypeDelay   time.Duration
+	ContactActionDelay time.Duration
 }
 
 // Controller holds shared bot state and turns chat commands into responses.
@@ -65,6 +87,15 @@ type Controller struct {
 	quietHours  bool
 	quietStart  string
 	quietEnd    string
+
+	pollInterval       time.Duration
+	contactTypeDelay   time.Duration
+	contactActionDelay time.Duration
+	excludeFurnished   bool
+
+	// Subscribers notified when the poll interval changes (scheduler resets its
+	// ticker). Append-only; nil-safe.
+	pollIntervalSubs []chan<- struct{}
 
 	// Callbacks providing extra info for /status and /stats.
 	onStatusRequest func() string
@@ -88,16 +119,37 @@ func New(store SettingsStore, logger *slog.Logger, def Defaults) *Controller {
 		logger = slog.Default()
 	}
 	c := &Controller{
-		store:       store,
-		logger:      logger,
-		timezone:    def.Timezone,
-		contactMode: ContactModeTest,
-		quietHours:  def.QuietHoursEnabled,
-		quietStart:  def.QuietHoursStart,
-		quietEnd:    def.QuietHoursEnd,
+		store:              store,
+		logger:             logger,
+		timezone:           def.Timezone,
+		contactMode:        ContactModeTest,
+		quietHours:         def.QuietHoursEnabled,
+		quietStart:         def.QuietHoursStart,
+		quietEnd:           def.QuietHoursEnd,
+		pollInterval:       fallbackDuration(def.PollInterval, 5*time.Minute),
+		contactTypeDelay:   fallbackDuration(def.ContactTypeDelay, 50*time.Millisecond),
+		contactActionDelay: fallbackDuration(def.ContactActionDelay, 1*time.Second),
+		excludeFurnished:   true,
 	}
 	c.loadFromStore()
 	return c
+}
+
+func fallbackDuration(v, def time.Duration) time.Duration {
+	if v > 0 {
+		return v
+	}
+	return def
+}
+
+func clampDuration(v, lo, hi time.Duration) time.Duration {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func (c *Controller) loadFromStore() {
@@ -121,10 +173,31 @@ func (c *Controller) loadFromStore() {
 	if v, _ := c.store.GetMeta(ctx, MetaQuietHoursEnd); v != "" {
 		c.quietEnd = v
 	}
+	if v, _ := c.store.GetMeta(ctx, MetaPollIntervalSeconds); v != "" {
+		if secs, err := time.ParseDuration(v + "s"); err == nil && secs > 0 {
+			c.pollInterval = clampDuration(secs, MinPollInterval, MaxPollInterval)
+		}
+	}
+	if v, _ := c.store.GetMeta(ctx, MetaContactTypeDelayMs); v != "" {
+		if d, err := time.ParseDuration(v + "ms"); err == nil && d > 0 {
+			c.contactTypeDelay = clampDuration(d, MinContactTypeDelay, MaxContactTypeDelay)
+		}
+	}
+	if v, _ := c.store.GetMeta(ctx, MetaContactActionDelayMs); v != "" {
+		if d, err := time.ParseDuration(v + "ms"); err == nil && d > 0 {
+			c.contactActionDelay = clampDuration(d, MinContactActionDelay, MaxContactActionDelay)
+		}
+	}
+	if v, _ := c.store.GetMeta(ctx, MetaExcludeFurnished); v != "" {
+		c.excludeFurnished = v == "true"
+	}
 	c.logger.Info("settings loaded from meta",
 		"contact_mode", contactModeString(c.contactMode),
 		"quiet_hours_enabled", c.quietHours,
 		"quiet_hours_window", c.quietStart+"-"+c.quietEnd,
+		"poll_interval", c.pollInterval,
+		"contact_type_delay", c.contactTypeDelay,
+		"contact_action_delay", c.contactActionDelay,
 	)
 }
 
@@ -211,6 +284,9 @@ func (c *Controller) HandleCommand(raw string) string {
 	case "contact_test":
 		c.SetContactMode(ContactModeTest)
 		return "🧪 *Test-Modus aktiviert*\n\nNeue Wohnungen werden gemeldet und die Nachricht wird dir als Vorschau gezeigt (nicht gesendet)."
+	case "contact_approve":
+		c.SetContactMode(ContactModeApprove)
+		return "🛂 *Approval-Modus aktiviert*\n\nNeue Wohnungen werden einzeln vorgeschlagen — bestätige mit ✅ um die Nachricht zu senden, oder ❌ um sie zu verwerfen."
 	case "quiet_on":
 		c.SetQuietHours(true)
 		s, e := c.QuietHoursWindow()
@@ -308,6 +384,7 @@ func (c *Controller) helpMessage() string {
 
 *Kontakt:*
 /contact_on - Auto-Kontakt aktivieren
+/contact_approve - Vorschläge einzeln bestätigen
 /contact_test - Test-Modus (Nachricht-Vorschau)
 /contact_off - Nur beobachten (kein Kontakt)
 
@@ -368,6 +445,8 @@ func contactModeLabel(mode ContactMode) string {
 		return "⏸ Beobachtungsmodus"
 	case ContactModeTest:
 		return "🧪 Test-Modus (Nachricht-Vorschau)"
+	case ContactModeApprove:
+		return "🛂 Approval-Modus (einzelne Bestätigung)"
 	case ContactModeOn:
 		return "✅ Auto-Kontakt aktiv"
 	}
@@ -375,13 +454,15 @@ func contactModeLabel(mode ContactMode) string {
 }
 
 // contactModeString returns the canonical lower-case mode token used in the
-// meta store and the HTTP API (off/test/on).
+// meta store and the HTTP API (off/test/approve/on).
 func contactModeString(mode ContactMode) string {
 	switch mode {
 	case ContactModeOff:
 		return "off"
 	case ContactModeTest:
 		return "test"
+	case ContactModeApprove:
+		return "approve"
 	case ContactModeOn:
 		return "on"
 	}
@@ -395,6 +476,8 @@ func parseContactMode(s string) (ContactMode, bool) {
 		return ContactModeOff, true
 	case "test":
 		return ContactModeTest, true
+	case "approve":
+		return ContactModeApprove, true
 	case "on":
 		return ContactModeOn, true
 	}
@@ -413,6 +496,14 @@ func (c *Controller) IsTestModeEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.contactMode == ContactModeTest
+}
+
+// IsApprovalModeEnabled reports whether approval mode is on (per-listing
+// confirmation via Telegram inline buttons).
+func (c *Controller) IsApprovalModeEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.contactMode == ContactModeApprove
 }
 
 // IsQuietHoursEnabled returns a pointer to the quiet-hours override flag.
@@ -545,6 +636,99 @@ func (c *Controller) SetQuietHours(enabled bool) {
 		val = "true"
 	}
 	c.persist(MetaQuietHoursEnabled, val)
+}
+
+// GetPollInterval returns the current poll interval (scheduler reads this each
+// cycle so changes take effect on the next tick).
+func (c *Controller) GetPollInterval() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.pollInterval
+}
+
+// SetPollInterval clamps to [MinPollInterval, MaxPollInterval], persists, and
+// notifies any subscribers so the scheduler can reset its ticker immediately.
+func (c *Controller) SetPollInterval(d time.Duration) time.Duration {
+	v := clampDuration(d, MinPollInterval, MaxPollInterval)
+	c.mu.Lock()
+	c.pollInterval = v
+	subs := append([]chan<- struct{}(nil), c.pollIntervalSubs...)
+	c.mu.Unlock()
+	c.persist(MetaPollIntervalSeconds, fmt.Sprintf("%d", int(v.Seconds())))
+	for _, ch := range subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	return v
+}
+
+// SubscribePollInterval registers ch to receive a non-blocking ping whenever
+// SetPollInterval is called. The channel should be buffered (size 1) — sends
+// that would block are dropped, since the receiver only needs the latest signal.
+func (c *Controller) SubscribePollInterval(ch chan<- struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pollIntervalSubs = append(c.pollIntervalSubs, ch)
+}
+
+// GetContactTypeDelay returns the current per-keystroke delay for the contact
+// form (Chrome typing). Contact service reads this fresh on each form submit.
+func (c *Controller) GetContactTypeDelay() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.contactTypeDelay
+}
+
+// SetContactTypeDelay clamps to [MinContactTypeDelay, MaxContactTypeDelay] and
+// persists. Returns the effective value after clamping.
+func (c *Controller) SetContactTypeDelay(d time.Duration) time.Duration {
+	v := clampDuration(d, MinContactTypeDelay, MaxContactTypeDelay)
+	c.mu.Lock()
+	c.contactTypeDelay = v
+	c.mu.Unlock()
+	c.persist(MetaContactTypeDelayMs, fmt.Sprintf("%d", v.Milliseconds()))
+	return v
+}
+
+// GetContactActionDelay returns the current pause between Chrome actions
+// (clicks / field navigation) during contact form submission.
+func (c *Controller) GetContactActionDelay() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.contactActionDelay
+}
+
+// SetContactActionDelay clamps to [MinContactActionDelay, MaxContactActionDelay]
+// and persists. Returns the effective value after clamping.
+func (c *Controller) SetContactActionDelay(d time.Duration) time.Duration {
+	v := clampDuration(d, MinContactActionDelay, MaxContactActionDelay)
+	c.mu.Lock()
+	c.contactActionDelay = v
+	c.mu.Unlock()
+	c.persist(MetaContactActionDelayMs, fmt.Sprintf("%d", v.Milliseconds()))
+	return v
+}
+
+// IsExcludeFurnishedEnabled reports whether the bot should drop listings
+// that look furnished (möbliert / furnished). Default true.
+func (c *Controller) IsExcludeFurnishedEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.excludeFurnished
+}
+
+// SetExcludeFurnished toggles the furnished filter and persists it.
+func (c *Controller) SetExcludeFurnished(enabled bool) {
+	c.mu.Lock()
+	c.excludeFurnished = enabled
+	c.mu.Unlock()
+	val := "false"
+	if enabled {
+		val = "true"
+	}
+	c.persist(MetaExcludeFurnished, val)
 }
 
 // SetQuietHoursWindow stores a new "HH:MM" start/end pair. Returns an error if

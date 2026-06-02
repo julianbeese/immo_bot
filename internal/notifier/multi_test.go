@@ -32,6 +32,10 @@ func (f *fakeNotifier) NotifyMessagePreview(context.Context, *domain.Listing, st
 	f.calls++
 	return f.err
 }
+func (f *fakeNotifier) NotifyApprovalRequest(context.Context, *domain.Listing, string, int64) error {
+	f.calls++
+	return f.err
+}
 func (f *fakeNotifier) SendRawMessage(context.Context, string) error { f.calls++; return f.err }
 func (f *fakeNotifier) IsEnabled() bool                              { return f.enabled }
 

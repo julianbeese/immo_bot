@@ -1,8 +1,8 @@
-Hallo zusammen,
+{{.Salutation}}
 
-wir haben gerade Ihr Inserat „{{.Title}}"{{if .District}} in {{.District}}{{end}} entdeckt und großes Interesse an der Wohnung — als 2er-WG.
+wir haben gerade {{if .Title}}Ihr Inserat „{{.Title}}"{{else}}Ihre Wohnung{{end}}{{if .District}} in {{.District}}{{end}} entdeckt und großes Interesse an der Wohnung — als 2er-WG.
 
-Kurz zu uns: Ich (Julian) arbeite als Forward Deployed Engineer (Software) bei einem Startup in München-Schwabing. Anna Neske, eine Freundin aus meinem Master, beginnt im Oktober bei McKinsey in München. Wir kennen uns seit Jahren und suchen ein Zuhause, in dem wir uns schnell wohlfühlen können.
+Kurz zu uns: Ich (Julian) arbeite als Forward Deployed Engineer (Software) in München-Schwabing, unbefristet, ~90k€ brutto/Jahr. Anna Neske, eine Freundin aus meinem Master, beginnt im Oktober bei McKinsey in München.
 
 {{.PersonalizedDetails}}
 

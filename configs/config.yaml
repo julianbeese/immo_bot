@@ -87,44 +87,55 @@ campaigns:
   single:
     message_template_path: "configs/message_single.txt"
     ai_prompt: |
-      Du schreibst für Julian, einen Forward Deployed Engineer (Software) bei
-      einem Startup mit Büro in München-Schwabing. Er arbeitet viel und sucht
-      ein Zuhause, in dem er gut entspannen kann.
+      Du schreibst für Julian, einen Forward Deployed Engineer (Software) in
+      München-Schwabing. Es bewirbt sich EINE Person, nicht ein Paar oder eine
+      Gruppe.
 
-      Schreibe 2–3 authentische Sätze aus der Ich-Perspektive, die KONKRETE,
-      sichtbare Details aus dem Inserat aufgreifen — z. B. Bodenbelag (Parkett,
-      Dielen, Fliesen), Lichteinfall, Grundriss, Balkon/Terrasse, Küche, Bad,
-      Lage/Viertel, Ausstattung. Nimm mindestens ein konkretes Detail aus dem
-      übergebenen Beschreibungstext auf, statt allgemein zu bleiben.
+      Schreibe 2–3 authentische Sätze AUSSCHLIESSLICH aus der Ich-Perspektive
+      über die WOHNUNG. Greife KONKRETE, sichtbare Details aus dem Inserat auf
+      — z. B. Bodenbelag (Parkett, Dielen, Fliesen), Lichteinfall, Grundriss,
+      Balkon/Terrasse, Küche, Bad, Lage/Viertel, Ausstattung. Nimm mindestens
+      ein konkretes Detail aus dem übergebenen Beschreibungstext auf.
+
+      ABSOLUTES VERBOT: Verwende NIEMALS "wir", "uns", "unser", "unsere" —
+      auch nicht wenn die Inseratsfotos Personen zeigen oder das Inserat
+      Paare/Familien anspricht. Nutze ausschließlich "ich", "mich", "mir",
+      "mein". Falls du das nicht einhältst, ist die Nachricht unbrauchbar.
 
       Tonalität: warm, persönlich, ohne Floskeln; nicht werblich.
 
-      WICHTIG: keine Anrede, keine Grußformel, keine Erwähnung von Besichtigung
-      oder Selbstauskunft — das steht im Rahmen-Anschreiben. Gib NUR die 2–3
-      Sätze zurück, ohne Anführungszeichen, ohne Aufzählung.
+      WICHTIG: keine Anrede, keine Grußformel, keine Erwähnung von Job, Gehalt,
+      Besichtigung oder Selbstauskunft — das steht alles im Rahmen-Anschreiben.
+      Gib NUR die 2–3 Sätze über die Wohnung zurück, ohne Anführungszeichen,
+      ohne Aufzählung.
     # contact_profile leer = globales contact.profile. Für abweichende
     # Bewerberdaten das Profil KOMPLETT ausfüllen (sonst greift das globale).
   wg:
     message_template_path: "configs/message_wg.txt"
     ai_prompt: |
       Du schreibst für eine 2er-WG aus Julian (Forward Deployed Engineer,
-      Software, Startup in München-Schwabing) und Anna Neske (steigt im
-      Oktober bei McKinsey in München ein). Beide kennen sich aus dem Master,
-      ziehen erstmals zusammen und suchen ein Zuhause, in dem sie sich
-      schnell wohlfühlen.
+      Software, in München-Schwabing) und Anna Neske (steigt im Oktober bei
+      McKinsey in München ein). Beide kennen sich aus dem Master.
 
-      Schreibe 2–3 authentische Sätze aus der Wir-Perspektive, die KONKRETE,
-      sichtbare Details aus dem Inserat aufgreifen — besonders Aspekte, die
-      eine WG glücklich machen: getrennte Schlafzimmer, Größenverhältnis der
-      Zimmer, gemeinsamer Wohn-/Essbereich, Küche, Bad-Situation, Balkon,
-      Lage/Viertel. Nimm mindestens ein konkretes Detail aus dem
-      Beschreibungstext auf.
+      Schreibe 2–3 authentische Sätze aus der Wir-Perspektive über die
+      WOHNUNG. Greife KONKRETE, sichtbare Details aus dem Inserat auf —
+      besonders Aspekte, die eine WG glücklich machen: getrennte Schlafzimmer,
+      Größenverhältnis der Zimmer, gemeinsamer Wohn-/Essbereich, Küche,
+      Bad-Situation, Balkon, Lage/Viertel. Nimm mindestens ein konkretes
+      Detail aus dem Beschreibungstext auf.
+
+      VERBOTE:
+      - Keine Erwähnung von Arbeit, Job, Arbeitstag, "nach einem langen Tag",
+        Beruf, Gehalt — das steht alles bereits im Rahmen-Anschreiben.
+      - Keine Erwähnung von Besichtigung oder Selbstauskunft.
+      - Keine Anrede, keine Grußformel.
+      - Keine Floskeln wie "wir freuen uns sehr" oder "wäre ein Traum" —
+        bleib konkret und sachlich.
 
       Tonalität: warm, persönlich, ohne Floskeln; nicht werblich.
 
-      WICHTIG: keine Anrede, keine Grußformel, keine Erwähnung von Besichtigung
-      oder Selbstauskunft — das steht im Rahmen-Anschreiben. Gib NUR die 2–3
-      Sätze zurück, ohne Anführungszeichen, ohne Aufzählung.
+      Gib NUR die 2–3 Sätze über die Wohnung zurück, ohne Anführungszeichen,
+      ohne Aufzählung.
     # contact_profile:
     #   salutation: MALE
     #   first_name: Julian

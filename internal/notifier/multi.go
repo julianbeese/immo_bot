@@ -17,6 +17,7 @@ type Notifier interface {
 	NotifyContactFailed(ctx context.Context, l *domain.Listing, errMsg string) error
 	NotifyError(ctx context.Context, errMsg string) error
 	NotifyMessagePreview(ctx context.Context, l *domain.Listing, message string) error
+	NotifyApprovalRequest(ctx context.Context, l *domain.Listing, message string, sentMessageID int64) error
 	SendRawMessage(ctx context.Context, text string) error
 	IsEnabled() bool
 }
@@ -78,6 +79,10 @@ func (m *Multi) NotifyError(ctx context.Context, errMsg string) error {
 
 func (m *Multi) NotifyMessagePreview(ctx context.Context, l *domain.Listing, message string) error {
 	return m.fanOut(func(c Notifier) error { return c.NotifyMessagePreview(ctx, l, message) })
+}
+
+func (m *Multi) NotifyApprovalRequest(ctx context.Context, l *domain.Listing, message string, sentMessageID int64) error {
+	return m.fanOut(func(c Notifier) error { return c.NotifyApprovalRequest(ctx, l, message, sentMessageID) })
 }
 
 func (m *Multi) SendRawMessage(ctx context.Context, text string) error {

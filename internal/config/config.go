@@ -83,6 +83,30 @@ type IS24Config struct {
 	MinDelay             time.Duration `yaml:"min_delay"`
 	MaxDelay             time.Duration `yaml:"max_delay"`
 	UserAgents           []string      `yaml:"user_agents"`
+	Proxy                ProxyConfig   `yaml:"proxy"`
+}
+
+// ProxyConfig routes Chrome traffic through an upstream HTTP/SOCKS proxy
+// (e.g. Shifter, IPRoyal, Smartproxy residential). URL is the scheme+host+port
+// only (e.g. "http://gw.example.com:7000"); credentials are answered via the
+// Chrome DevTools fetch domain because Chrome ignores user:pass in
+// --proxy-server.
+type ProxyConfig struct {
+	URL      string `yaml:"url"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	// BandwidthCapMB stops new browser fetches once this many MB have been
+	// consumed in the current calendar month. 0 = unlimited (track only).
+	BandwidthCapMB int `yaml:"bandwidth_cap_mb"`
+}
+
+// Enabled reports whether a proxy URL is configured.
+func (p ProxyConfig) Enabled() bool { return strings.TrimSpace(p.URL) != "" }
+
+// RequiresAuth reports whether credentials should be answered via the fetch
+// auth handler.
+func (p ProxyConfig) RequiresAuth() bool {
+	return p.Enabled() && strings.TrimSpace(p.Username) != ""
 }
 
 // TelegramConfig for Telegram bot settings
@@ -232,6 +256,12 @@ func Load(path string) (*Config, error) {
 	// Override with environment variables
 	if v := os.Getenv("IS24_COOKIE"); v != "" {
 		cfg.IS24.Cookie = v
+	}
+	applyEnvString("IS24_PROXY_URL", &cfg.IS24.Proxy.URL)
+	applyEnvString("IS24_PROXY_USER", &cfg.IS24.Proxy.Username)
+	applyEnvString("IS24_PROXY_PASS", &cfg.IS24.Proxy.Password)
+	if err := applyEnvInt("IS24_PROXY_BANDWIDTH_CAP_MB", &cfg.IS24.Proxy.BandwidthCapMB); err != nil {
+		return nil, err
 	}
 	if err := applyEnvBool("TELEGRAM_ENABLED", &cfg.Telegram.Enabled); err != nil {
 		return nil, err

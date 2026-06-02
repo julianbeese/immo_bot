@@ -52,9 +52,23 @@ type Listing struct {
 	Description     string    `json:"description,omitempty"`
 	LandlordName    string    `json:"landlord_name,omitempty"`
 	LandlordType    string    `json:"landlord_type,omitempty"`
+	// ContactPerson is the individual Ansprechpartner (e.g. "Max Mustermann"),
+	// separate from LandlordName (realtor agency). ContactSalutation caches the
+	// gender classification used to render the personalized salutation; one of
+	// SalutationMale, SalutationFemale, SalutationUnknown.
+	ContactPerson     string `json:"contact_person,omitempty"`
+	ContactSalutation string `json:"contact_salutation,omitempty"`
 	ImageURLs       []string  `json:"image_urls,omitempty"`
 	ContactFormURL  string    `json:"contact_form_url,omitempty"`
+	// ExclusiveExpose is true for IS24 "Suchen+ exclusive" listings — the
+	// contact form is paywalled, so non-subscribers can't actually message
+	// the landlord. Scraped from IS24.expose.exclusiveExpose.
+	ExclusiveExpose bool      `json:"exclusive_expose"`
 	SearchProfileID int64     `json:"search_profile_id"`
+	// SearchProfileName is populated from the search_profiles JOIN at read
+	// time so notifications can show which profile surfaced the listing.
+	// Not stored as a listings column.
+	SearchProfileName string    `json:"search_profile_name,omitempty"`
 	Contacted       bool      `json:"contacted"`
 	Notified        bool      `json:"notified"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -114,12 +128,22 @@ type ActivityLog struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// Salutation constants cache gender classification on a Listing. UNKNOWN
+// (or empty) makes the messenger fall back to the gender-neutral salutation.
+const (
+	SalutationMale    = "MALE"
+	SalutationFemale  = "FEMALE"
+	SalutationUnknown = "UNKNOWN"
+)
+
 // MessageStatus constants
 const (
-	MessageStatusPending = "pending"
-	MessageStatusSent    = "sent"
-	MessageStatusFailed  = "failed"
-	MessageStatusPreview = "preview"
+	MessageStatusPending          = "pending"
+	MessageStatusSent             = "sent"
+	MessageStatusFailed           = "failed"
+	MessageStatusPreview          = "preview"
+	MessageStatusPendingApproval  = "pending_approval"
+	MessageStatusRejected         = "rejected"
 )
 
 // ActivityAction constants

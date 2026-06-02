@@ -367,14 +367,17 @@ func (r *Repository) CreateListing(ctx context.Context, l *domain.Listing) error
 			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
 			has_elevator, pets_allowed, build_year, available_from,
 			description, landlord_name, landlord_type, image_urls,
-			contact_form_url, search_profile_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			contact_form_url, search_profile_id, contact_person,
+			contact_salutation, exclusive_expose
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		l.IS24ID, l.Title, l.URL, l.Address, l.City, l.District, l.PostalCode,
 		l.Price, l.PricePerSqm, l.Rooms, l.Area, l.HasBalcony, l.HasEBK,
 		l.HasElevator, nullableBool(l.PetsAllowed), nullableInt(l.BuildYear),
 		l.AvailableFrom, l.Description, l.LandlordName, l.LandlordType,
 		string(imageURLs), l.ContactFormURL, l.SearchProfileID,
+		nullableString(l.ContactPerson), nullableString(l.ContactSalutation),
+		l.ExclusiveExpose,
 	)
 	if err != nil {
 		return err
@@ -398,12 +401,14 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 	var imageURLs sql.NullString
 	var petsAllowed sql.NullBool
 
+	var contactPerson, contactSalutation sql.NullString
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id, is24_id, title, url, address, city, district, postal_code,
 			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
 			has_elevator, pets_allowed, build_year, available_from,
 			description, landlord_name, landlord_type, image_urls,
 			contact_form_url, search_profile_id, contacted, notified,
+			contact_person, contact_salutation, exclusive_expose,
 			created_at, updated_at
 		FROM listings WHERE is24_id = ?
 	`, is24ID).Scan(
@@ -412,7 +417,8 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 		&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &l.BuildYear,
 		&l.AvailableFrom, &l.Description, &l.LandlordName, &l.LandlordType,
 		&imageURLs, &l.ContactFormURL, &l.SearchProfileID, &l.Contacted,
-		&l.Notified, &l.CreatedAt, &l.UpdatedAt,
+		&l.Notified, &contactPerson, &contactSalutation, &l.ExclusiveExpose,
+		&l.CreatedAt, &l.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -425,6 +431,8 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 		json.Unmarshal([]byte(imageURLs.String), &l.ImageURLs)
 	}
 	l.PetsAllowed = nullBoolPtr(petsAllowed)
+	l.ContactPerson = contactPerson.String
+	l.ContactSalutation = contactSalutation.String
 	return &l, nil
 }
 
@@ -545,14 +553,25 @@ func (r *Repository) GetPreviewableListings(ctx context.Context) ([]domain.Listi
 }
 
 func (r *Repository) getListingsByCondition(ctx context.Context, condition, suffix string) ([]domain.Listing, error) {
+	// LEFT JOIN search_profiles so the profile name is available for downstream
+	// notifications without a per-row lookup. LEFT (not INNER) keeps orphan
+	// listings — whose profile was deleted — visible.
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, is24_id, title, url, address, city, district, postal_code,
-			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
-			has_elevator, pets_allowed, build_year, available_from,
-			description, landlord_name, landlord_type, image_urls,
-			contact_form_url, search_profile_id, contacted, notified,
-			created_at, updated_at
-		FROM listings WHERE %s ORDER BY created_at DESC %s
+		SELECT listings.id, listings.is24_id, listings.title, listings.url,
+			listings.address, listings.city, listings.district, listings.postal_code,
+			listings.price, listings.price_per_sqm, listings.rooms, listings.area,
+			listings.has_balcony, listings.has_ebk, listings.has_elevator,
+			listings.pets_allowed, listings.build_year, listings.available_from,
+			listings.description, listings.landlord_name, listings.landlord_type,
+			listings.image_urls, listings.contact_form_url, listings.search_profile_id,
+			listings.contacted, listings.notified,
+			listings.contact_person, listings.contact_salutation,
+			listings.exclusive_expose,
+			listings.created_at, listings.updated_at,
+			search_profiles.name
+		FROM listings
+		LEFT JOIN search_profiles ON search_profiles.id = listings.search_profile_id
+		WHERE %s ORDER BY listings.created_at DESC %s
 	`, condition, suffix))
 	if err != nil {
 		return nil, err
@@ -564,6 +583,8 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 		var l domain.Listing
 		var imageURLs, address, city, district, postalCode, availableFrom, description sql.NullString
 		var landlordName, landlordType, contactFormURL sql.NullString
+		var contactPerson, contactSalutation sql.NullString
+		var searchProfileName sql.NullString
 		var petsAllowed sql.NullBool
 		var buildYear sql.NullInt64
 		var pricePerSqm sql.NullFloat64
@@ -574,7 +595,10 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 			&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &buildYear,
 			&availableFrom, &description, &landlordName, &landlordType,
 			&imageURLs, &contactFormURL, &l.SearchProfileID, &l.Contacted,
-			&l.Notified, &l.CreatedAt, &l.UpdatedAt,
+			&l.Notified, &contactPerson, &contactSalutation,
+			&l.ExclusiveExpose,
+			&l.CreatedAt, &l.UpdatedAt,
+			&searchProfileName,
 		)
 		if err != nil {
 			return nil, err
@@ -590,7 +614,10 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 		l.Description = description.String
 		l.LandlordName = landlordName.String
 		l.LandlordType = landlordType.String
+		l.ContactPerson = contactPerson.String
+		l.ContactSalutation = contactSalutation.String
 		l.ContactFormURL = contactFormURL.String
+		l.SearchProfileName = searchProfileName.String
 		if imageURLs.Valid {
 			json.Unmarshal([]byte(imageURLs.String), &l.ImageURLs)
 		}
@@ -598,6 +625,18 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 		listings = append(listings, l)
 	}
 	return listings, rows.Err()
+}
+
+// UpdateListingContact persists the Ansprechpartner name and cached gender
+// classification (SalutationMale / Female / Unknown) so the gender lookup runs
+// at most once per listing.
+func (r *Repository) UpdateListingContact(ctx context.Context, id int64, person, salutation string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE listings
+		SET contact_person = ?, contact_salutation = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, nullableString(person), nullableString(salutation), id)
+	return err
 }
 
 // MarkListingNotified marks a listing as notified
@@ -653,6 +692,170 @@ func (r *Repository) UpdateSentMessageStatus(ctx context.Context, id int64, stat
 		UPDATE sent_messages SET status = ?, error_msg = ?, sent_at = CURRENT_TIMESTAMP WHERE id = ?
 	`, status, errorMsg, id)
 	return err
+}
+
+// GetSentMessage returns a single sent_message by ID. Used to look up the
+// pending approval when a Telegram callback button fires.
+func (r *Repository) GetSentMessage(ctx context.Context, id int64) (*domain.SentMessage, error) {
+	var sm domain.SentMessage
+	var errMsg sql.NullString
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, listing_id, is24_id, message, status, error_msg, sent_at, created_at
+		FROM sent_messages WHERE id = ?
+	`, id).Scan(&sm.ID, &sm.ListingID, &sm.IS24ID, &sm.Message, &sm.Status,
+		&errMsg, &sm.SentAt, &sm.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	sm.ErrorMsg = errMsg.String
+	return &sm, nil
+}
+
+// GetSentMessagesByListing returns every sent_message for one listing,
+// oldest first. Used by the dashboard's listing detail drawer to show the
+// message history (preview/pending_approval/sent/rejected/failed).
+func (r *Repository) GetSentMessagesByListing(ctx context.Context, listingID int64) ([]domain.SentMessage, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, listing_id, is24_id, message, status, error_msg, sent_at, created_at
+		FROM sent_messages WHERE listing_id = ?
+		ORDER BY sent_at ASC, id ASC
+	`, listingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.SentMessage
+	for rows.Next() {
+		var sm domain.SentMessage
+		var errMsg sql.NullString
+		if err := rows.Scan(&sm.ID, &sm.ListingID, &sm.IS24ID, &sm.Message, &sm.Status,
+			&errMsg, &sm.SentAt, &sm.CreatedAt); err != nil {
+			return nil, err
+		}
+		sm.ErrorMsg = errMsg.String
+		out = append(out, sm)
+	}
+	return out, rows.Err()
+}
+
+// CountPendingApprovals returns how many sent_messages are still awaiting the
+// user's ✅/❌ decision. Used by the scheduler to enforce strict-sequential
+// approval (skip new suggestions while one is in flight).
+func (r *Repository) CountPendingApprovals(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sent_messages WHERE status = ?
+	`, domain.MessageStatusPendingApproval).Scan(&n)
+	return n, err
+}
+
+// GetNextApprovableListing returns the next listing that should be proposed
+// for approval. Eligibility:
+//   - notified, not yet contacted
+//   - no sent_message currently pending_approval, sent, or pending (in flight)
+//   - if a previous proposal was rejected, the listing becomes eligible again
+//     after a cooldown (default 6h since the most recent rejection)
+//
+// Returns nil, nil when the queue is empty.
+func (r *Repository) GetNextApprovableListing(ctx context.Context, rejectCooldown time.Duration) (*domain.Listing, error) {
+	listings, err := r.getListingsByCondition(ctx, fmt.Sprintf(`
+		contacted = 0
+		AND notified = 1
+		AND NOT EXISTS (
+			SELECT 1 FROM sent_messages sm
+			WHERE sm.listing_id = listings.id
+			AND sm.status IN ('%s', '%s', '%s')
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM sent_messages sm
+			WHERE sm.listing_id = listings.id
+			AND sm.status = '%s'
+			AND sm.sent_at > datetime('now', '-%d seconds')
+		)
+	`,
+		domain.MessageStatusPendingApproval,
+		domain.MessageStatusSent,
+		domain.MessageStatusPending,
+		domain.MessageStatusRejected,
+		int(rejectCooldown.Seconds()),
+	), "LIMIT 1")
+	if err != nil {
+		return nil, err
+	}
+	if len(listings) == 0 {
+		return nil, nil
+	}
+	return &listings[0], nil
+}
+
+// GetListingByID returns a listing by its primary key. Used by the approval
+// callback to load the full record before submitting a contact form.
+func (r *Repository) GetListingByID(ctx context.Context, id int64) (*domain.Listing, error) {
+	var l domain.Listing
+	var imageURLs, address, city, district, postalCode, availableFrom, description sql.NullString
+	var landlordName, landlordType, contactFormURL sql.NullString
+	var contactPerson, contactSalutation sql.NullString
+	var searchProfileName sql.NullString
+	var petsAllowed sql.NullBool
+	var buildYear sql.NullInt64
+	var pricePerSqm sql.NullFloat64
+
+	err := r.db.QueryRowContext(ctx, `
+		SELECT listings.id, listings.is24_id, listings.title, listings.url,
+			listings.address, listings.city, listings.district, listings.postal_code,
+			listings.price, listings.price_per_sqm, listings.rooms, listings.area,
+			listings.has_balcony, listings.has_ebk, listings.has_elevator,
+			listings.pets_allowed, listings.build_year, listings.available_from,
+			listings.description, listings.landlord_name, listings.landlord_type,
+			listings.image_urls, listings.contact_form_url, listings.search_profile_id,
+			listings.contacted, listings.notified,
+			listings.contact_person, listings.contact_salutation,
+			listings.exclusive_expose,
+			listings.created_at, listings.updated_at,
+			search_profiles.name
+		FROM listings
+		LEFT JOIN search_profiles ON search_profiles.id = listings.search_profile_id
+		WHERE listings.id = ?
+	`, id).Scan(
+		&l.ID, &l.IS24ID, &l.Title, &l.URL, &address, &city, &district,
+		&postalCode, &l.Price, &pricePerSqm, &l.Rooms, &l.Area,
+		&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &buildYear,
+		&availableFrom, &description, &landlordName, &landlordType,
+		&imageURLs, &contactFormURL, &l.SearchProfileID, &l.Contacted,
+		&l.Notified, &contactPerson, &contactSalutation,
+		&l.ExclusiveExpose,
+		&l.CreatedAt, &l.UpdatedAt,
+		&searchProfileName,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	l.Address = address.String
+	l.City = city.String
+	l.District = district.String
+	l.PostalCode = postalCode.String
+	l.PricePerSqm = pricePerSqm.Float64
+	l.BuildYear = int(buildYear.Int64)
+	l.AvailableFrom = availableFrom.String
+	l.Description = description.String
+	l.LandlordName = landlordName.String
+	l.LandlordType = landlordType.String
+	l.ContactPerson = contactPerson.String
+	l.ContactSalutation = contactSalutation.String
+	l.ContactFormURL = contactFormURL.String
+	l.SearchProfileName = searchProfileName.String
+	if imageURLs.Valid {
+		json.Unmarshal([]byte(imageURLs.String), &l.ImageURLs)
+	}
+	l.PetsAllowed = nullBoolPtr(petsAllowed)
+	return &l, nil
 }
 
 // Session methods

@@ -155,6 +155,7 @@ interface Listing {
   rooms?: number
   area?: number
   campaign?: string
+  search_profile_id?: number
   notified: boolean
   contacted: boolean
   created_at: string
@@ -209,6 +210,8 @@ export default function DashboardPage() {
   const [refreshing, setRefreshing] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [searchQuery, setSearchQuery] = React.useState("")
+  // Listing filter by search profile id; "all" = no filter.
+  const [profileFilter, setProfileFilter] = React.useState<string>("all")
   
   // Add Profile form state
   const [isAddingProfile, setIsAddingProfile] = React.useState(false)
@@ -471,18 +474,22 @@ export default function DashboardPage() {
     }
   }
 
-  // Filter listings based on search query
+  // Filter listings by search profile and free-text query.
   const filteredListings = React.useMemo(() => {
-    if (!searchQuery.trim()) return listings
-    const q = searchQuery.toLowerCase()
-    return listings.filter(
-      l =>
+    const q = searchQuery.trim().toLowerCase()
+    return listings.filter(l => {
+      if (profileFilter !== "all" && String(l.search_profile_id ?? "") !== profileFilter) {
+        return false
+      }
+      if (!q) return true
+      return (
         l.title.toLowerCase().includes(q) ||
         (l.address && l.address.toLowerCase().includes(q)) ||
         (l.city && l.city.toLowerCase().includes(q)) ||
         (l.campaign && l.campaign.toLowerCase().includes(q))
-    )
-  }, [listings, searchQuery])
+      )
+    })
+  }, [listings, searchQuery, profileFilter])
 
   if (loading && !overview) {
     return (
@@ -1165,18 +1172,37 @@ export default function DashboardPage() {
           <CardHeader className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="text-md font-bold tracking-tight">Gefundene Wohnungen</CardTitle>
-              <CardDescription className="text-xs">Übersicht der {listings.length} neuesten Immobilienfunde</CardDescription>
+              <CardDescription className="text-xs">
+                {filteredListings.length === listings.length
+                  ? `Übersicht der ${listings.length} neuesten Immobilienfunde`
+                  : `${filteredListings.length} von ${listings.length} Funden`}
+              </CardDescription>
             </div>
-            
-            {/* Interactive Search Filter */}
-            <div className="relative w-full sm:max-w-[280px]">
-              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Filtern..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9 h-9"
-              />
+
+            {/* Search profile filter + free-text search */}
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+              <Select value={profileFilter} onValueChange={setProfileFilter}>
+                <SelectTrigger className="h-9 w-full sm:w-[200px]">
+                  <SelectValue placeholder="Alle Suchprofile" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Alle Suchprofile</SelectItem>
+                  {profiles.map((p) => (
+                    <SelectItem key={p.id} value={String(p.id)}>
+                      {esc(p.name)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div className="relative w-full sm:max-w-[280px]">
+                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Filtern..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-9 h-9"
+                />
+              </div>
             </div>
           </CardHeader>
           <CardContent>
@@ -1259,7 +1285,7 @@ export default function DashboardPage() {
                   ) : (
                     <TableRow>
                       <TableCell colSpan={6} className="h-24 text-center text-muted-foreground text-sm">
-                        {searchQuery ? "Keine passenden Wohnungen gefunden." : "Noch keine Wohnungen gefunden."}
+                        {searchQuery || profileFilter !== "all" ? "Keine passenden Wohnungen gefunden." : "Noch keine Wohnungen gefunden."}
                       </TableCell>
                     </TableRow>
                   )}

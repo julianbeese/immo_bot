@@ -3,6 +3,7 @@ package contact
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -41,15 +42,24 @@ type Submitter struct {
 	behavior   *antidetect.HumanBehavior
 	profile    Profile
 	chromePath string
+	mapper     FieldMapper // optional LLM fallback when static-selector fill fails
+	logger     *slog.Logger
 }
 
-// NewSubmitter creates a new contact form submitter
-func NewSubmitter(cookie string, profile Profile, chromePath string, behavior *antidetect.HumanBehavior) *Submitter {
+// NewSubmitter creates a new contact form submitter. mapper is optional: when
+// non-nil it drives the LLM fallback fill path after the static-selector path
+// fails. logger may be nil.
+func NewSubmitter(cookie string, profile Profile, chromePath string, behavior *antidetect.HumanBehavior, mapper FieldMapper, logger *slog.Logger) *Submitter {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Submitter{
 		cookie:     cookie,
 		behavior:   behavior,
 		profile:    profile,
 		chromePath: chromePath,
+		mapper:     mapper,
+		logger:     logger,
 	}
 }
 
@@ -89,38 +99,42 @@ func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message
 		contactURL = fmt.Sprintf("https://www.immobilienscout24.de/expose/%s#/basicContact/email", listing.IS24ID)
 	}
 
-	// Execute contact form submission
-	err := chromedp.Run(browserCtx,
-		// Set cookies if available
+	// Phase 1: navigate and wait for the form. If this fails the page is not
+	// reachable (WAF, cookie, bad URL) — the LLM fallback can't help, so abort.
+	if err := chromedp.Run(browserCtx,
 		s.setCookies(),
-
-		// Navigate to contact form
 		chromedp.Navigate(contactURL),
-
-		// Wait for page to load
 		chromedp.Sleep(s.behavior.ThinkPause()),
-
-		// Wait for form to be visible
 		chromedp.WaitVisible(`form[data-qa="contactForm"], .contact-form, #contactForm`, chromedp.ByQuery),
+	); err != nil {
+		return fmt.Errorf("contact form not reachable: %w", err)
+	}
 
-		// Fill in the form with human-like delays
+	// Phase 2: fast path — fill via hard-coded selectors, submit, verify.
+	fastErr := chromedp.Run(browserCtx,
 		s.fillFormWithDelay(message, profile),
-
-		// Submit the form
 		s.submitForm(),
-
-		// Wait for confirmation
 		chromedp.Sleep(2*time.Second),
-
 		// Verify that the page moved into a success state. Without this a
 		// validation error after the click would be recorded as a real contact.
 		s.ensureSubmitted(),
 	)
-
-	if err != nil {
-		return fmt.Errorf("browser automation failed: %w", err)
+	if fastErr == nil {
+		return nil
 	}
 
+	// Phase 3: LLM fallback. Static selectors likely drifted from IS24's DOM;
+	// let the mapper read the live form and decide how to fill it.
+	if s.mapper == nil {
+		return fmt.Errorf("browser automation failed: %w", fastErr)
+	}
+	s.logger.Warn("static contact fill failed, trying llm fallback",
+		"is24_id", listing.IS24ID, "error", fastErr)
+
+	if err := s.fillViaLLM(browserCtx, message, profile); err != nil {
+		return fmt.Errorf("contact submission failed (static: %v; llm fallback: %w)", fastErr, err)
+	}
+	s.logger.Info("contact submitted via llm fallback", "is24_id", listing.IS24ID)
 	return nil
 }
 
@@ -456,13 +470,12 @@ func (s *Submitter) typeWithDelay(ctx context.Context, selector, text string) er
 		return fmt.Errorf("element not found: %s", selector)
 	}
 
-	// Clear field first
-	err = chromedp.Run(ctx,
+	// Clear field first. Ignore the error: chromedp.Clear fails on an already
+	// empty textarea ("does not have child #text node"), which would otherwise
+	// abort the whole type and leave the message blank.
+	_ = chromedp.Run(ctx,
 		chromedp.Clear(selector, chromedp.ByQuery),
 	)
-	if err != nil {
-		return err
-	}
 
 	// Focus the element
 	err = chromedp.Run(ctx,

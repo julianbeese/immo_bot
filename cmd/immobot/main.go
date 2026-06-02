@@ -154,14 +154,22 @@ func main() {
 		logger.Info("OpenAI message enhancement enabled", "model", cfg.OpenAI.Model)
 	}
 
-	// Initialize contact submitter
+	// Initialize contact submitter. When OpenAI is configured, wire an LLM
+	// form-filler as fallback for when the static selectors miss IS24's DOM.
 	var contacter *contact.Submitter
 	if cfg.Contact.Enabled {
+		var mapper contact.FieldMapper
+		if cfg.OpenAI.Enabled && cfg.OpenAI.APIKey != "" {
+			mapper = messenger.NewOpenAIFormFiller(cfg.OpenAI.APIKey, cfg.OpenAI.Model)
+			logger.Info("contact form llm fallback enabled", "model", cfg.OpenAI.Model)
+		}
 		contacter = contact.NewSubmitter(
 			cfg.IS24.Cookie,
 			toContactProfile(cfg.Contact.Profile),
 			cfg.Contact.ChromePath,
 			humanBehavior,
+			mapper,
+			logger,
 		)
 		logger.Info("auto-contact ready (controlled via Telegram)")
 	}

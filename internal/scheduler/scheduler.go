@@ -54,6 +54,7 @@ type Scheduler struct {
 	// Callbacks to check contact mode
 	isAutoContactEnabled func() bool
 	isTestModeEnabled    func() bool
+	isNotifyEnabled      func() bool // false (mode=off) suppresses new-listing notifications
 	isQuietHoursEnabled  func() *bool // nil = use config, non-nil = override
 	// Returns true if the given time falls inside the active quiet-hours
 	// window. When nil, the scheduler falls back to cfg.IsWithinQuietHours.
@@ -122,6 +123,7 @@ func NewScheduler(
 		logger:               logger,
 		isAutoContactEnabled: func() bool { return false }, // Default: observation mode
 		isTestModeEnabled:    func() bool { return false },
+		isNotifyEnabled:      func() bool { return true }, // Default: notify (preserves prior behavior)
 		isQuietHoursEnabled:  func() *bool { return nil }, // nil = use config
 	}
 }
@@ -138,6 +140,12 @@ func (s *Scheduler) SetAutoContactCallback(fn func() bool) {
 // SetTestModeCallback sets the callback to check if test mode is enabled
 func (s *Scheduler) SetTestModeCallback(fn func() bool) {
 	s.isTestModeEnabled = fn
+}
+
+// SetNotifyCallback sets the callback deciding whether new-listing
+// notifications are sent (false = mode Off → fully paused).
+func (s *Scheduler) SetNotifyCallback(fn func() bool) {
+	s.isNotifyEnabled = fn
 }
 
 // SetQuietHoursCallback sets the callback to check if quiet hours override is set
@@ -275,9 +283,13 @@ func (s *Scheduler) poll(ctx context.Context) error {
 	s.checkCookieHealth(ctx, len(profiles), totalRaw, failures, quietNow)
 
 	if !quietNow {
-		// Process notifications for unnotified listings
-		if err := s.sendNotifications(ctx); err != nil {
-			s.logger.Error("notification sending failed", "error", err)
+		// Process notifications for unnotified listings (suppressed in Off mode).
+		if s.isNotifyEnabled() {
+			if err := s.sendNotifications(ctx); err != nil {
+				s.logger.Error("notification sending failed", "error", err)
+			}
+		} else {
+			s.logger.Info("notifications paused (contact mode off)")
 		}
 
 		// Process auto-contact for uncontacted listings (only if enabled via Telegram)

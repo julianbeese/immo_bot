@@ -23,9 +23,10 @@ import (
 type ContactMode int
 
 const (
-	ContactModeOff  ContactMode = iota // Observation only
-	ContactModeTest                    // Show message preview, don't send
-	ContactModeOn                      // Actually send contacts
+	ContactModeOff    ContactMode = iota // Fully paused: no notifications, no contact
+	ContactModeNotify                    // Find + notify new listings, never contact
+	ContactModeTest                      // Notify + show message preview, don't send
+	ContactModeOn                        // Notify + actually send contacts
 )
 
 // SettingsStore is the minimal persistence surface the controller needs.
@@ -207,7 +208,10 @@ func (c *Controller) HandleCommand(raw string) string {
 		return "✅ *Auto-Kontakt aktiviert*\n\nNeue Wohnungen werden automatisch angeschrieben."
 	case "contact_off":
 		c.SetContactMode(ContactModeOff)
-		return "⏸ *Beobachtungsmodus*\n\nNeue Wohnungen werden nur gemeldet, keine Kontaktaufnahme."
+		return "⏸ *Pausiert*\n\nKeine Meldungen und keine Kontaktaufnahme."
+	case "contact_notify":
+		c.SetContactMode(ContactModeNotify)
+		return "🔔 *Nur benachrichtigen*\n\nNeue Wohnungen werden gemeldet, aber nicht automatisch angeschrieben."
 	case "contact_test":
 		c.SetContactMode(ContactModeTest)
 		return "🧪 *Test-Modus aktiviert*\n\nNeue Wohnungen werden gemeldet und die Nachricht wird dir als Vorschau gezeigt (nicht gesendet)."
@@ -309,7 +313,8 @@ func (c *Controller) helpMessage() string {
 *Kontakt:*
 /contact_on - Auto-Kontakt aktivieren
 /contact_test - Test-Modus (Nachricht-Vorschau)
-/contact_off - Nur beobachten (kein Kontakt)
+/contact_notify - Nur benachrichtigen (kein Kontakt)
+/contact_off - Pausiert (keine Meldungen)
 
 *Ruhezeiten:*
 /quiet_on - Ruhezeiten an
@@ -365,7 +370,9 @@ func (c *Controller) ContactModeLabel() string {
 func contactModeLabel(mode ContactMode) string {
 	switch mode {
 	case ContactModeOff:
-		return "⏸ Beobachtungsmodus"
+		return "⏸ Pausiert (keine Meldungen)"
+	case ContactModeNotify:
+		return "🔔 Nur benachrichtigen"
 	case ContactModeTest:
 		return "🧪 Test-Modus (Nachricht-Vorschau)"
 	case ContactModeOn:
@@ -380,6 +387,8 @@ func contactModeString(mode ContactMode) string {
 	switch mode {
 	case ContactModeOff:
 		return "off"
+	case ContactModeNotify:
+		return "notify"
 	case ContactModeTest:
 		return "test"
 	case ContactModeOn:
@@ -393,6 +402,8 @@ func parseContactMode(s string) (ContactMode, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "off":
 		return ContactModeOff, true
+	case "notify":
+		return ContactModeNotify, true
 	case "test":
 		return ContactModeTest, true
 	case "on":
@@ -406,6 +417,14 @@ func (c *Controller) IsAutoContactEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.contactMode == ContactModeOn
+}
+
+// AreNotificationsEnabled reports whether new-listing notifications should be
+// sent. Every mode except Off notifies; Off is a full pause.
+func (c *Controller) AreNotificationsEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.contactMode != ContactModeOff
 }
 
 // IsTestModeEnabled reports whether test mode is on (shows message preview).

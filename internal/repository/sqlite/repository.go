@@ -403,7 +403,7 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
 			has_elevator, pets_allowed, build_year, available_from,
 			description, landlord_name, landlord_type, image_urls,
-			contact_form_url, search_profile_id, contacted, notified,
+			contact_form_url, search_profile_id, contacted, notified, skipped,
 			created_at, updated_at
 		FROM listings WHERE is24_id = ?
 	`, is24ID).Scan(
@@ -412,7 +412,7 @@ func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*do
 		&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &l.BuildYear,
 		&l.AvailableFrom, &l.Description, &l.LandlordName, &l.LandlordType,
 		&imageURLs, &l.ContactFormURL, &l.SearchProfileID, &l.Contacted,
-		&l.Notified, &l.CreatedAt, &l.UpdatedAt,
+		&l.Notified, &l.Skipped, &l.CreatedAt, &l.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -517,9 +517,28 @@ func (r *Repository) GetUnnotifiedListings(ctx context.Context) ([]domain.Listin
 	return r.getListingsByCondition(ctx, "notified = 0", "")
 }
 
-// GetUncontactedListings returns listings that haven't been contacted
+// GetUncontactedListings returns listings eligible for auto-contact: notified,
+// not yet contacted, and not manually skipped by the user.
 func (r *Repository) GetUncontactedListings(ctx context.Context) ([]domain.Listing, error) {
-	return r.getListingsByCondition(ctx, "contacted = 0 AND notified = 1", "")
+	return r.getListingsByCondition(ctx, "contacted = 0 AND notified = 1 AND skipped = 0", "")
+}
+
+// SetListingSkipped sets/clears the manual skip flag on a listing.
+func (r *Repository) SetListingSkipped(ctx context.Context, id int64, skipped bool) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE listings SET skipped = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		skipped, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("no listing with id %d", id)
+	}
+	return nil
 }
 
 // ListRecentListings returns the most recent listings (for the dashboard).
@@ -536,6 +555,7 @@ func (r *Repository) GetPreviewableListings(ctx context.Context) ([]domain.Listi
 	return r.getListingsByCondition(ctx, `
 		contacted = 0
 		AND notified = 1
+		AND skipped = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM sent_messages
 			WHERE sent_messages.listing_id = listings.id
@@ -550,7 +570,7 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
 			has_elevator, pets_allowed, build_year, available_from,
 			description, landlord_name, landlord_type, image_urls,
-			contact_form_url, search_profile_id, contacted, notified,
+			contact_form_url, search_profile_id, contacted, notified, skipped,
 			created_at, updated_at
 		FROM listings WHERE %s ORDER BY created_at DESC %s
 	`, condition, suffix))
@@ -574,7 +594,7 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 			&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &buildYear,
 			&availableFrom, &description, &landlordName, &landlordType,
 			&imageURLs, &contactFormURL, &l.SearchProfileID, &l.Contacted,
-			&l.Notified, &l.CreatedAt, &l.UpdatedAt,
+			&l.Notified, &l.Skipped, &l.CreatedAt, &l.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err

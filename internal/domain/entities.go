@@ -57,6 +57,7 @@ type Listing struct {
 	SearchProfileID int64     `json:"search_profile_id"`
 	Contacted       bool      `json:"contacted"`
 	Notified        bool      `json:"notified"`
+	Skipped         bool      `json:"skipped"` // manually marked seen/handled → excluded from auto-contact
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }

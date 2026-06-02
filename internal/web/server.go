@@ -75,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cookie", s.handleGetCookie)
 	mux.HandleFunc("POST /api/cookie", s.handleSetCookie)
 	mux.HandleFunc("POST /api/profiles", s.handleAddProfile)
+	mux.HandleFunc("POST /api/listings/{id}/skip", s.handleSkipListing)
 	mux.HandleFunc("POST /api/profiles/{id}/active", s.handleSetProfileActive)
 	mux.HandleFunc("DELETE /api/profiles/{id}", s.handleDeleteProfile)
 	return mux
@@ -170,6 +171,28 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		msgs = []domain.InboxMessage{}
 	}
 	writeJSON(w, http.StatusOK, msgs)
+}
+
+// handleSkipListing sets/clears the manual skip flag so a listing is excluded
+// from (or returned to) auto-contact.
+func (s *Server) handleSkipListing(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid id"))
+		return
+	}
+	var body struct {
+		Skipped bool `json:"skipped"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.repo.SetListingSkipped(r.Context(), id, body.Skipped); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "skipped": body.Skipped})
 }
 
 func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +296,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if body.ContactMode != nil {
 		mode, ok := parseMode(*body.ContactMode)
 		if !ok {
-			writeErr(w, http.StatusBadRequest, errors.New("contact_mode must be off, test or on"))
+			writeErr(w, http.StatusBadRequest, errors.New("contact_mode must be off, notify, test or on"))
 			return
 		}
 		s.ctrl.SetContactMode(mode)
@@ -441,6 +464,8 @@ func modeString(m control.ContactMode) string {
 	switch m {
 	case control.ContactModeOff:
 		return "off"
+	case control.ContactModeNotify:
+		return "notify"
 	case control.ContactModeTest:
 		return "test"
 	case control.ContactModeOn:
@@ -453,6 +478,8 @@ func parseMode(s string) (control.ContactMode, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "off":
 		return control.ContactModeOff, true
+	case "notify":
+		return control.ContactModeNotify, true
 	case "test":
 		return control.ContactModeTest, true
 	case "on":

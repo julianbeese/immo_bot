@@ -215,6 +215,7 @@ func main() {
 	// Connect shared controller state to scheduler
 	sched.SetAutoContactCallback(ctrl.IsAutoContactEnabled)
 	sched.SetTestModeCallback(ctrl.IsTestModeEnabled)
+	sched.SetNotifyCallback(ctrl.AreNotificationsEnabled)
 	sched.SetQuietHoursCallback(ctrl.IsQuietHoursEnabled)
 	// Quiet-hours WINDOW (start/end) override from controller — falls back to
 	// cfg defaults inside the controller when no override is persisted.
@@ -359,7 +360,8 @@ func main() {
 *Kontakt:*
 /contact_on - Auto-Kontakt an
 /contact_test - Test-Modus (Vorschau)
-/contact_off - Nur beobachten
+/contact_notify - Nur benachrichtigen
+/contact_off - Pausiert
 
 *Ruhezeiten:*
 /quiet_on - Ruhezeiten an

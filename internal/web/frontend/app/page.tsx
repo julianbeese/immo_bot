@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   BellRing,
   Eye,
+  EyeOff,
   Settings,
   Search,
   Building,
@@ -97,7 +98,7 @@ interface Stats {
 }
 
 interface Overview {
-  contact_mode: "off" | "test" | "on"
+  contact_mode: "off" | "notify" | "test" | "on"
   contact_label: string
   quiet_hours: boolean
   quiet_hours_start: string
@@ -158,6 +159,7 @@ interface Listing {
   search_profile_id?: number
   notified: boolean
   contacted: boolean
+  skipped: boolean
   created_at: string
 }
 
@@ -399,6 +401,23 @@ export default function DashboardPage() {
     } catch (e: unknown) {
       toast.error("Fehler beim Umschalten", {
         description: errorMessage(e, "Profilstatus konnte nicht geändert werden."),
+      })
+    }
+  }
+
+  // Toggle a listing's manual skip flag (exclude from / return to auto-contact).
+  const toggleSkip = async (id: number, skipped: boolean) => {
+    try {
+      await api(`/api/listings/${id}/skip`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skipped }),
+      })
+      setListings(prev => prev.map(l => (l.id === id ? { ...l, skipped } : l)))
+      toast.success(skipped ? "Als ignoriert markiert" : "Wieder aktiviert")
+    } catch (e: unknown) {
+      toast.error("Fehler beim Umschalten", {
+        description: errorMessage(e, "Status konnte nicht geändert werden."),
       })
     }
   }
@@ -667,16 +686,23 @@ export default function DashboardPage() {
               {/* Contact Mode Select */}
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-muted-foreground">Kontakt-Modus</label>
-                <div className="flex w-full flex-col gap-3 rounded-lg border p-3 bg-muted/10 sm:flex-row sm:items-center sm:justify-between">
-                  <span className="text-sm font-medium">Bewerbungen:</span>
-                  <div className="grid grid-cols-3 rounded-md border p-1 bg-muted/40 text-xs sm:inline-flex">
+                <div className="flex w-full flex-col gap-3 rounded-lg border p-3 bg-muted/10">
+                  <div className="grid grid-cols-2 gap-1 rounded-md border p-1 bg-muted/40 text-xs sm:grid-cols-4">
                     <Button
                       variant={currentOverview.contact_mode === "off" ? "default" : "ghost"}
                       size="sm"
                       onClick={() => setSetting({ contact_mode: "off" })}
                       className="h-7 gap-1 px-3 text-xs font-medium rounded"
                     >
-                      <Pause className="h-3 w-3" /> Aus
+                      <Pause className="h-3 w-3" /> Pausiert
+                    </Button>
+                    <Button
+                      variant={currentOverview.contact_mode === "notify" ? "default" : "ghost"}
+                      size="sm"
+                      onClick={() => setSetting({ contact_mode: "notify" })}
+                      className="h-7 gap-1 px-3 text-xs font-medium rounded"
+                    >
+                      <BellRing className="h-3 w-3" /> Melden
                     </Button>
                     <Button
                       variant={currentOverview.contact_mode === "test" ? "default" : "ghost"}
@@ -699,6 +725,15 @@ export default function DashboardPage() {
                       <Play className="h-3 w-3" /> Live
                     </Button>
                   </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    {currentOverview.contact_mode === "off"
+                      ? "Pausiert: keine Meldungen, kein Anschreiben."
+                      : currentOverview.contact_mode === "notify"
+                      ? "Melden: neue Wohnungen werden gefunden und gemeldet, aber nicht angeschrieben."
+                      : currentOverview.contact_mode === "test"
+                      ? "Test: Wohnungen gemeldet, Nachricht-Vorschau (nichts gesendet)."
+                      : "Live: neue Wohnungen werden automatisch angeschrieben."}
+                  </p>
                 </div>
               </div>
 
@@ -1258,7 +1293,15 @@ export default function DashboardPage() {
                           </Badge>
                         </TableCell>
                         <TableCell className="text-right">
-                          <div className="inline-flex flex-wrap gap-1.5 justify-end">
+                          <div className="inline-flex flex-wrap items-center gap-1.5 justify-end">
+                            {l.skipped && (
+                              <Badge
+                                variant="outline"
+                                className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.subtle}`}
+                              >
+                                <EyeOff className="h-3 w-3" /> ignoriert
+                              </Badge>
+                            )}
                             {l.notified && (
                               <Badge
                                 variant="outline"
@@ -1275,9 +1318,18 @@ export default function DashboardPage() {
                                 <CheckCircle2 className="h-3 w-3" /> kontaktiert
                               </Badge>
                             )}
-                            {!l.notified && !l.contacted && (
+                            {!l.notified && !l.contacted && !l.skipped && (
                               <span className="text-xs text-muted-foreground italic px-2">Kein Status</span>
                             )}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => toggleSkip(l.id, !l.skipped)}
+                              title={l.skipped ? "Wieder für Auto-Kontakt freigeben" : "Vom Auto-Kontakt ausschließen"}
+                              className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+                            >
+                              {l.skipped ? <RotateCcw className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                            </Button>
                           </div>
                         </TableCell>
                       </TableRow>

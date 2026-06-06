@@ -13,6 +13,7 @@ import (
 	"github.com/julianbeese/immo_bot/internal/config"
 	"github.com/julianbeese/immo_bot/internal/control"
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
+	"github.com/julianbeese/immo_bot/internal/secrets"
 )
 
 func newTestServer(t *testing.T) (*Server, *control.Controller) {
@@ -33,7 +34,7 @@ func newTestServer(t *testing.T) (*Server, *control.Controller) {
 	ctrl := control.New(nil, nil, control.Defaults{QuietHoursEnabled: true, QuietHoursStart: "22:00", QuietHoursEnd: "07:00", Timezone: "Europe/Berlin"})
 	// StatsFunc returns (total, contacted, notified).
 	stats := func(context.Context) (int, int, int) { return 5, 1, 3 }
-	return New(repo, ctrl, cfg, stats, nil /* CookieSetter */, slog.Default()), ctrl
+	return New(repo, ctrl, cfg, stats, nil /* CookieSetter */, nil /* SettingsNotifier */, nil /* ApprovalHandler */, slog.Default()), ctrl
 }
 
 func TestOverview(t *testing.T) {
@@ -113,6 +114,52 @@ func TestAddProfileValidatesCampaign(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &profiles)
 	if len(profiles) != 1 || profiles[0]["category"] != "wg" {
 		t.Errorf("profile not listed correctly: %v", profiles)
+	}
+}
+
+func TestSetEmailPasswordEncrypted(t *testing.T) {
+	repo, err := sqlite.New(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { repo.Close() })
+
+	cfg := &config.Config{}
+	ctrl := control.New(nil, nil, control.Defaults{})
+	stats := func(context.Context) (int, int, int) { return 0, 0, 0 }
+	s := New(repo, ctrl, cfg, stats, nil, nil, nil, slog.Default())
+
+	key := make([]byte, 32)
+	copy(key, []byte("01234567890123456789012345678901"))
+	enc, err := secrets.NewEncrypter(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetCookieEncrypter(enc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/email",
+		strings.NewReader(`{"password":"my-app-password"}`))
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+
+	var dto emailDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &dto); err != nil {
+		t.Fatal(err)
+	}
+	if !dto.PasswordSet || dto.PasswordSource != "meta" {
+		t.Errorf("dto = %+v, want password_set=true source=meta", dto)
+	}
+
+	stored, _ := repo.GetMeta(context.Background(), sqlite.MetaEmailPassword)
+	if !secrets.IsEncrypted(stored) {
+		t.Fatalf("stored password not encrypted: %q", stored)
+	}
+	pt, err := enc.Decrypt(stored)
+	if err != nil || pt != "my-app-password" {
+		t.Errorf("decrypt = %q, %v", pt, err)
 	}
 }
 

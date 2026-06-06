@@ -39,6 +39,43 @@ func TestResolveCampaignFillsContactFromGlobal(t *testing.T) {
 	}
 }
 
+func TestResolveCampaignPartialContactOverride(t *testing.T) {
+	// Verifies the field-by-field merge: a campaign that overrides only one
+	// field keeps every other value from the global profile. This is the
+	// "wg sets adults=2, inherits everything else from .env" case.
+	c := &Config{
+		Message: MessageConfig{TemplatePath: "global.txt"},
+		Contact: ContactConfig{Profile: ContactProfile{
+			FirstName: "Julian", LastName: "Beese",
+			Email: "j@example.com", Phone: "0123",
+			Street: "Schulstraße", HouseNumber: "37",
+			PostalCode: "80634", City: "München",
+			Adults: 1, Income: 4200,
+		}},
+		DefaultCampaign: "single",
+		Campaigns: map[string]Campaign{
+			"single": {MessageTemplatePath: "single.txt"},
+			"wg":     {MessageTemplatePath: "wg.txt", Contact: ContactProfile{Adults: 2}},
+		},
+	}
+
+	single := c.ResolveCampaign("single")
+	if single.Contact.Adults != 1 {
+		t.Errorf("single.Adults = %d, want 1", single.Contact.Adults)
+	}
+	if single.Contact.FirstName != "Julian" || single.Contact.City != "München" {
+		t.Errorf("single did not inherit global profile: %+v", single.Contact)
+	}
+
+	wg := c.ResolveCampaign("wg")
+	if wg.Contact.Adults != 2 {
+		t.Errorf("wg.Adults = %d, want 2 (override)", wg.Contact.Adults)
+	}
+	if wg.Contact.FirstName != "Julian" || wg.Contact.City != "München" || wg.Contact.Income != 4200 {
+		t.Errorf("wg lost inherited fields: %+v", wg.Contact)
+	}
+}
+
 func TestResolveCampaignFallsBackToDefault(t *testing.T) {
 	c := testCfg()
 	got := c.ResolveCampaign("does-not-exist")

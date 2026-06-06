@@ -19,6 +19,7 @@ import {
   Lock,
   BellRing,
   Eye,
+  EyeOff,
   Settings,
   Search,
   Building,
@@ -29,10 +30,13 @@ import {
   FileText,
   LayoutDashboard,
   Mail,
+  ListChecks,
+  Check,
+  X,
   Cookie as CookieIcon
 } from "lucide-react"
 
-type View = "overview" | "settings" | "profiles" | "templates" | "listings" | "inbox"
+type View = "overview" | "settings" | "profiles" | "templates" | "listings" | "queue" | "inbox"
 
 const VIEWS: { key: View; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: "overview",  label: "Übersicht",         icon: LayoutDashboard },
@@ -40,6 +44,7 @@ const VIEWS: { key: View; label: string; icon: React.ComponentType<{ className?:
   { key: "profiles",  label: "Suchprofile",       icon: Building },
   { key: "templates", label: "Nachrichten",       icon: Wand2 },
   { key: "listings",  label: "Wohnungen",         icon: Home },
+  { key: "queue",     label: "Queue",             icon: ListChecks },
   { key: "inbox",     label: "Posteingang",       icon: Mail },
 ]
 
@@ -134,6 +139,29 @@ interface CookieInfo {
   source: "env" | "meta" | "none"
 }
 
+interface EmailConfig {
+  enabled: boolean
+  imap_host: string
+  username: string
+  password_set: boolean
+  password_source: "meta" | "env" | "none"
+  mailbox: string
+  lookback_hours: number
+  senders: string
+  meta_override: boolean
+  restart_required: boolean
+}
+
+// Empty buffer used until the API responds. Keeps form inputs controlled.
+const EMPTY_EMAIL_DRAFT = {
+  imap_host: "",
+  username: "",
+  password: "",
+  mailbox: "INBOX",
+  lookback_hours: 72,
+  senders: "",
+}
+
 interface SearchProfile {
   id: number
   name: string
@@ -165,6 +193,26 @@ interface InboxMessage {
   created_at: string
 }
 
+interface InboxScanResult {
+  inspected: number            // raw IMAP candidates above the watermark
+  fetched: number              // candidates that passed the sender filter
+  already_known: number
+  classified: number
+  landlord_replies: number
+  notified: number
+  senders: string[] | null
+  errors: string[] | null
+  duration_ms: number
+}
+
+// formatScanDuration renders a Go-side duration as a human-readable label.
+// Sub-second scans are common (no new mails → ~150–300ms) and "0.0 s" hides
+// the fact that anything happened at all, so we show ms below 1s.
+function formatScanDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))} ms`
+  return `${(ms / 1000).toFixed(1)} s`
+}
+
 interface Listing {
   id: number
   is24_id?: string
@@ -192,6 +240,8 @@ interface Listing {
   search_profile_id?: number
   notified: boolean
   contacted: boolean
+  skipped: boolean
+  rejected: boolean
   created_at: string
 }
 
@@ -206,6 +256,18 @@ interface SentMessage {
   created_at: string
 }
 
+interface QueuePending {
+  sent_message_id: number
+  message: string
+  created_at: string
+  listing: Listing
+}
+
+interface QueueData {
+  pending: QueuePending | null
+  next: Listing[]
+}
+
 const EMPTY_OVERVIEW: Overview = {
   contact_mode: "off",
   contact_label: "aus",
@@ -216,7 +278,7 @@ const EMPTY_OVERVIEW: Overview = {
   default_campaign: "",
   campaigns: [],
   stats: { total: 0, notified: 0, contacted: 0 },
-  poll_interval_seconds: 300,
+  poll_interval_seconds: 1800,
   contact_type_delay_ms: 50,
   contact_action_delay_ms: 1000,
   timing_ranges: {
@@ -265,6 +327,7 @@ function sectionSubtitle(view: View, o: Overview): string {
     case "profiles":  return "IS24-Suchen, die der Bot zyklisch abfragt."
     case "templates": return "AI-Prompt und Nachrichten-Template pro Kampagne."
     case "listings":  return "Gefundene Wohnungen aller Profile."
+    case "queue":     return "Approval-Queue: aktueller Vorschlag in Telegram und die nächsten Anwärter."
     case "inbox":     return "IS24-E-Mails: erkannte Anbieter-Antworten außerhalb des Chats."
   }
 }
@@ -323,6 +386,14 @@ export default function DashboardPage() {
   const [profiles, setProfiles] = React.useState<SearchProfile[]>([])
   const [listings, setListings] = React.useState<Listing[]>([])
   const [inbox, setInbox] = React.useState<InboxMessage[]>([])
+  // Posteingang: toggle hides system / info mails, only landlord replies remain.
+  // Default false so the user can see why a mail was classified as system at all.
+  const [inboxLandlordOnly, setInboxLandlordOnly] = React.useState(false)
+  const [inboxScanning, setInboxScanning] = React.useState(false)
+  const [inboxScanResult, setInboxScanResult] = React.useState<InboxScanResult | null>(null)
+  const [inboxScanError, setInboxScanError] = React.useState<string | null>(null)
+  const [queue, setQueue] = React.useState<QueueData>({ pending: null, next: [] })
+  const [queueBusy, setQueueBusy] = React.useState<"approve" | "reject" | null>(null)
   const [campaigns, setCampaigns] = React.useState<CampaignCfg[]>([])
   // Editable buffers keyed by campaign name; populated from /api/campaigns.
   const [drafts, setDrafts] = React.useState<Record<string, { ai_prompt: string; template: string }>>({})
@@ -332,6 +403,14 @@ export default function DashboardPage() {
   const [cookieInfo, setCookieInfo] = React.useState<CookieInfo | null>(null)
   const [cookieDraft, setCookieDraft] = React.useState("")
   const [savingCookie, setSavingCookie] = React.useState(false)
+
+  // Email config: server state vs draft edits. The IMAP password lives only in
+  // EMAIL_PASSWORD env — the API reports password_set so the UI can flag a
+  // missing env, but there's no input for it.
+  const [emailInfo, setEmailInfo] = React.useState<EmailConfig | null>(null)
+  const [emailDraft, setEmailDraft] = React.useState(EMPTY_EMAIL_DRAFT)
+  const [emailTouched, setEmailTouched] = React.useState(false)
+  const [savingEmail, setSavingEmail] = React.useState(false)
 
   // Active section selected via the sidebar.
   const [view, setView] = React.useState<View>("overview")
@@ -348,6 +427,18 @@ export default function DashboardPage() {
   const [selectedListing, setSelectedListing] = React.useState<Listing | null>(null)
   const [listingMessages, setListingMessages] = React.useState<SentMessage[]>([])
   const [loadingMessages, setLoadingMessages] = React.useState(false)
+
+  // Right-click context menu for listing rows. `x`/`y` are clientX/clientY
+  // captured at the contextmenu event so the menu pops up under the cursor.
+  // Closed via outside click / Escape / scroll (see effect below).
+  const [contextMenu, setContextMenu] = React.useState<{ x: number; y: number; listing: Listing } | null>(null)
+
+  // Bulk-select state for the listings table. `lastSelectedId` powers
+  // shift-click range selection (Excel-style) — the next shift+click extends
+  // selection from the last-toggled row to the new row.
+  const [selectedIds, setSelectedIds] = React.useState<Set<number>>(new Set())
+  const [lastSelectedId, setLastSelectedId] = React.useState<number | null>(null)
+  const [bulkBusy, setBulkBusy] = React.useState(false)
 
   // Add Profile form state
   const [isAddingProfile, setIsAddingProfile] = React.useState(false)
@@ -404,14 +495,35 @@ export default function DashboardPage() {
       const lData = await api("/api/listings?limit=100")
       setListings(lData || [])
 
-      const inData = await api("/api/inbox?limit=100")
+      const inData = await api(`/api/inbox?limit=100${inboxLandlordOnly ? "&landlord=1" : ""}`)
       setInbox(inData || [])
+
+      const qData: QueueData = await api("/api/queue")
+      setQueue({ pending: qData?.pending ?? null, next: qData?.next ?? [] })
 
       const cData: CampaignCfg[] = (await api("/api/campaigns")) || []
       setCampaigns(cData)
 
       const ckData: CookieInfo = await api("/api/cookie")
       setCookieInfo(ckData)
+
+      const emData: EmailConfig = await api("/api/email")
+      setEmailInfo(emData)
+      // Only seed the draft from the server while the user hasn't started
+      // typing — same pattern as campaign drafts. Password stays empty.
+      setEmailTouched(touched => {
+        if (!touched) {
+          setEmailDraft(prev => ({
+            ...prev,
+            imap_host: emData.imap_host,
+            username: emData.username,
+            mailbox: emData.mailbox || "INBOX",
+            lookback_hours: emData.lookback_hours || 72,
+            senders: emData.senders,
+          }))
+        }
+        return touched
+      })
       // Only seed drafts the user hasn't started editing, so background polling
       // doesn't clobber in-progress edits.
       setDrafts(prev => {
@@ -446,6 +558,96 @@ export default function DashboardPage() {
       clearInterval(interval)
     }
   }, [loadData])
+
+  // Refetch only the inbox when the landlord-only toggle changes. Skips the
+  // first run (loadData already fetched it) by gating on inboxLandlordOnly's
+  // truth value — the default is false, same as the initial loadData query.
+  const refreshInbox = React.useCallback(async () => {
+    try {
+      const inData = await api(`/api/inbox?limit=100${inboxLandlordOnly ? "&landlord=1" : ""}`)
+      setInbox(inData || [])
+    } catch {
+      // The next 10s loadData tick will retry; surfacing a toast here would be noisy.
+    }
+  }, [api, inboxLandlordOnly])
+
+  React.useEffect(() => {
+    void refreshInbox()
+  }, [refreshInbox])
+
+  // Manual mailbox poll trigger: POST /api/inbox/scan, then refresh the table.
+  // The response carries per-mail counts and any per-message errors so the UI
+  // can show what actually happened instead of a bare "ok".
+  const triggerInboxScan = React.useCallback(async () => {
+    setInboxScanning(true)
+    setInboxScanError(null)
+    try {
+      const res = await api("/api/inbox/scan", { method: "POST" }) as InboxScanResult
+      setInboxScanResult(res)
+      if (res.landlord_replies > 0) {
+        toast.success(`Posteingang gescannt: ${res.landlord_replies} Vermieter-Antwort${res.landlord_replies === 1 ? "" : "en"}`)
+      } else if (res.fetched > 0) {
+        toast.success(`Posteingang gescannt: ${res.fetched} neue IS24-Mail${res.fetched === 1 ? "" : "s"} (System / Info)`)
+      } else if (res.inspected > 0) {
+        toast.warning(`${res.inspected} Mail${res.inspected === 1 ? "" : "s"} im Zeitfenster — keine vom IS24-Filter`)
+      } else {
+        toast.success("Posteingang gescannt — keine neuen Mails")
+      }
+      await refreshInbox()
+    } catch (e: unknown) {
+      const msg = errorMessage(e, "Unbekannter Fehler")
+      setInboxScanError(msg)
+      setInboxScanResult(null)
+      toast.error("Scan fehlgeschlagen", { description: msg })
+    } finally {
+      setInboxScanning(false)
+    }
+  }, [api, refreshInbox])
+
+  // Close the row context menu on outside click, Escape, or scroll. Inside
+  // clicks land on the menu's own onClick handlers before this fires.
+  React.useEffect(() => {
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close() }
+    window.addEventListener("mousedown", close)
+    window.addEventListener("keydown", onKey)
+    window.addEventListener("scroll", close, true)
+    return () => {
+      window.removeEventListener("mousedown", close)
+      window.removeEventListener("keydown", onKey)
+      window.removeEventListener("scroll", close, true)
+    }
+  }, [contextMenu])
+
+  // Resolve the pending approval card via the scheduler (same code path as
+  // the Telegram ✅/❌ buttons). Refreshes the queue so the next eligible
+  // listing becomes the new pending entry — or shows the empty state.
+  const decidePending = async (action: "approve" | "reject") => {
+    if (!queue.pending) return
+    setQueueBusy(action)
+    try {
+      await api(`/api/queue/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sent_message_id: queue.pending.sent_message_id }),
+      })
+      toast.success(action === "approve" ? "Nachricht wird gesendet" : "Vorschlag verworfen", {
+        description: action === "approve"
+          ? "Der Bot reicht das Kontaktformular jetzt ein."
+          : "Die Wohnung kommt für 6 Stunden in den Reject-Cooldown.",
+      })
+      await loadData(true)
+    } catch (e: unknown) {
+      toast.error("Fehler", {
+        description: errorMessage(e, action === "approve"
+          ? "Bestätigung konnte nicht verarbeitet werden."
+          : "Verwerfen konnte nicht verarbeitet werden."),
+      })
+    } finally {
+      setQueueBusy(null)
+    }
+  }
 
   // Set Settings (Auto Contact Mode / Quiet Hours / Timing)
   const setSetting = async (body: {
@@ -524,6 +726,39 @@ export default function DashboardPage() {
     }
   }
 
+  // Save email (IMAP) settings. Password is only sent when the user typed a new
+  // one; the API encrypts it before writing to the database.
+  const saveEmail = async (enabled: boolean) => {
+    setSavingEmail(true)
+    try {
+      const body: Record<string, unknown> = {
+        enabled,
+        imap_host: emailDraft.imap_host.trim(),
+        username: emailDraft.username.trim(),
+        mailbox: emailDraft.mailbox.trim() || "INBOX",
+        lookback_hours: Number(emailDraft.lookback_hours) || 72,
+        senders: emailDraft.senders,
+      }
+      const pwd = emailDraft.password.trim()
+      if (pwd) body.password = pwd
+      const updated: EmailConfig = await api("/api/email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+      setEmailInfo(updated)
+      setEmailDraft(prev => ({ ...prev, password: "" }))
+      setEmailTouched(false)
+      toast.success("E-Mail-Einstellungen gespeichert", {
+        description: "Greifen beim nächsten Container-Restart.",
+      })
+    } catch (e: unknown) {
+      toast.error("Speichern fehlgeschlagen", { description: errorMessage(e, "E-Mail-Einstellungen konnten nicht gespeichert werden.") })
+    } finally {
+      setSavingEmail(false)
+    }
+  }
+
   // Reset a campaign back to its config.yaml default (clears the override).
   const resetCampaign = async (name: string) => {
     if (!confirm(`Kampagne "${name}" auf den Standard aus config.yaml zurücksetzen?`)) return
@@ -562,6 +797,81 @@ export default function DashboardPage() {
     } catch (e: unknown) {
       toast.error("Fehler beim Umschalten", {
         description: errorMessage(e, "Profilstatus konnte nicht geändert werden."),
+      })
+    }
+  }
+
+  // Clear the multi-select. Hoisted so handlers below can reset state after a
+  // bulk action completes.
+  const clearSelection = React.useCallback(() => {
+    setSelectedIds(new Set())
+    setLastSelectedId(null)
+  }, [])
+
+  // Bulk-apply the skip flag to every currently selected listing. One round
+  // trip via POST /api/listings/skip; on success we patch local state without
+  // re-fetching so the UI stays responsive.
+  const bulkSetSkipped = async (skipped: boolean) => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    setBulkBusy(true)
+    try {
+      const result: { updated: number } = await api("/api/listings/skip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids, skipped }),
+      })
+      const idSet = new Set(ids)
+      setListings(prev => prev.map(l => (idSet.has(l.id) ? { ...l, skipped } : l)))
+      toast.success(
+        `${result.updated} ${result.updated === 1 ? "Wohnung" : "Wohnungen"} ${skipped ? "ignoriert" : "wieder aufgenommen"}`
+      )
+      clearSelection()
+    } catch (e: unknown) {
+      toast.error("Aktion fehlgeschlagen", {
+        description: errorMessage(e, "Konnte den Status nicht ändern."),
+      })
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  // Toggle a listing's manual ignore flag (right-click → "Ignorieren"). The
+  // scheduler excludes skipped listings from auto-contact; they stay visible
+  // in the dashboard with an "ignoriert" badge so the user can un-skip later.
+  const toggleSkip = async (id: number, skipped: boolean) => {
+    try {
+      await api(`/api/listings/${id}/skip`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skipped }),
+      })
+      setListings(prev => prev.map(l => (l.id === id ? { ...l, skipped } : l)))
+      if (selectedListing?.id === id) {
+        setSelectedListing(prev => (prev ? { ...prev, skipped } : prev))
+      }
+      toast.success(skipped ? "Als ignoriert markiert" : "Wieder aufgenommen")
+    } catch (e: unknown) {
+      toast.error("Fehler beim Markieren", {
+        description: errorMessage(e, "Status konnte nicht geändert werden."),
+      })
+    }
+  }
+
+  // Undo a prior rejection so the listing flows through the approval queue
+  // again. Counterpart to the Telegram ❌ — the user accidentally rejected and
+  // wants it back.
+  const undoReject = async (id: number) => {
+    try {
+      await api(`/api/listings/${id}/unreject`, { method: "POST" })
+      setListings(prev => prev.map(l => (l.id === id ? { ...l, rejected: false } : l)))
+      if (selectedListing?.id === id) {
+        setSelectedListing(prev => (prev ? { ...prev, rejected: false } : prev))
+      }
+      toast.success("Verwerfung rückgängig gemacht")
+    } catch (e: unknown) {
+      toast.error("Fehler", {
+        description: errorMessage(e, "Verwerfung konnte nicht rückgängig gemacht werden."),
       })
     }
   }
@@ -654,6 +964,51 @@ export default function DashboardPage() {
     })
   }, [listings, searchQuery, profileFilter])
 
+  // Selection helpers — depend on filteredListings so range-selection and
+  // select-all both honour the active filter (selecting "all" only flips the
+  // currently visible rows, not the entire backing list).
+  const toggleRowSelected = (id: number, shiftKey: boolean) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (shiftKey && lastSelectedId != null && lastSelectedId !== id) {
+        const visibleIds = filteredListings.map(l => l.id)
+        const a = visibleIds.indexOf(lastSelectedId)
+        const b = visibleIds.indexOf(id)
+        if (a >= 0 && b >= 0) {
+          const [from, to] = a < b ? [a, b] : [b, a]
+          // Decide whether the range op adds or removes based on the target
+          // row's current state — matches the user's intent ("extend selection
+          // to here" vs "extend deselection to here").
+          const add = !prev.has(id)
+          for (let i = from; i <= to; i++) {
+            if (add) next.add(visibleIds[i])
+            else next.delete(visibleIds[i])
+          }
+          return next
+        }
+      }
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+    setLastSelectedId(id)
+  }
+  const allVisibleSelected =
+    filteredListings.length > 0 && filteredListings.every(l => selectedIds.has(l.id))
+  const someVisibleSelected =
+    !allVisibleSelected && filteredListings.some(l => selectedIds.has(l.id))
+  const toggleSelectAllVisible = () => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (allVisibleSelected) {
+        for (const l of filteredListings) next.delete(l.id)
+      } else {
+        for (const l of filteredListings) next.add(l.id)
+      }
+      return next
+    })
+  }
+
   if (loading && !overview) {
     return (
       <div className="flex h-screen w-screen flex-col items-center justify-center gap-4 bg-background text-foreground transition-colors duration-300">
@@ -669,6 +1024,82 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen bg-background text-foreground transition-colors duration-300 antialiased font-sans flex">
       <Toaster position="bottom-right" />
+
+      {/* Right-click context menu for listing rows. Clamped to the viewport so
+          opening near the right/bottom edge doesn't push it off-screen. When
+          right-clicking on (or after auto-selecting) a row that's part of a
+          multi-row selection, the actions apply to the whole batch via the
+          bulk endpoint. */}
+      {contextMenu && (() => {
+        const inMulti = selectedIds.has(contextMenu.listing.id) && selectedIds.size > 1
+        const count = inMulti ? selectedIds.size : 1
+        // The skip-toggle label flips on the right-clicked row's own state —
+        // even in bulk mode — so users get a predictable verb. The bulk call
+        // sets ALL selected rows to the target state regardless of their
+        // previous individual states.
+        const targetSkipped = !contextMenu.listing.skipped
+        return (
+        <div
+          className="fixed z-50 min-w-[220px] rounded-md border bg-popover text-popover-foreground shadow-md py-1 text-sm"
+          style={{
+            left: Math.min(contextMenu.x, (typeof window !== "undefined" ? window.innerWidth : 1024) - 240),
+            top: Math.min(contextMenu.y, (typeof window !== "undefined" ? window.innerHeight : 768) - 120),
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          {inMulti && (
+            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground border-b">
+              {count} ausgewählt
+            </div>
+          )}
+          <button
+            type="button"
+            className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/60 transition-colors"
+            onClick={() => {
+              const l = contextMenu.listing
+              setContextMenu(null)
+              if (inMulti) {
+                void bulkSetSkipped(targetSkipped)
+              } else {
+                void toggleSkip(l.id, targetSkipped)
+              }
+            }}
+          >
+            {targetSkipped ? (
+              <><EyeOff className="h-4 w-4 shrink-0" /> Ignorieren{inMulti ? ` (${count})` : ""}</>
+            ) : (
+              <><RotateCcw className="h-4 w-4 shrink-0" /> Wieder aufnehmen{inMulti ? ` (${count})` : ""}</>
+            )}
+          </button>
+          {!inMulti && contextMenu.listing.rejected && (
+            <button
+              type="button"
+              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/60 transition-colors"
+              onClick={() => {
+                const l = contextMenu.listing
+                setContextMenu(null)
+                void undoReject(l.id)
+              }}
+            >
+              <RotateCcw className="h-4 w-4 shrink-0" /> Verwerfung rückgängig
+            </button>
+          )}
+          {!inMulti && (
+            <button
+              type="button"
+              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/60 transition-colors"
+              onClick={() => {
+                window.open(contextMenu.listing.url, "_blank", "noreferrer")
+                setContextMenu(null)
+              }}
+            >
+              <ExternalLink className="h-4 w-4 shrink-0" /> Auf IS24 öffnen
+            </button>
+          )}
+        </div>
+        )
+      })()}
 
       {/* Sidebar */}
       <aside className="hidden md:flex md:w-56 lg:w-60 shrink-0 flex-col border-r bg-muted/10 sticky top-0 h-screen">
@@ -1139,6 +1570,155 @@ export default function DashboardPage() {
         </Card>
         )}
 
+        {/* Email (IMAP) configuration card — part of Einstellungen. */}
+        {view === "settings" && (
+        <Card className="shadow-sm border border-border/60">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-md font-bold tracking-tight flex items-center gap-2">
+                  <Mail className="h-4 w-4" /> E-Mail (IMAP)
+                </CardTitle>
+                <CardDescription className="text-xs">
+                  Posteingang nach IS24-Anbieter-Antworten überwachen. Änderungen werden beim nächsten
+                  Container-Restart aktiv. Bei Gmail/IONOS: ein App-Passwort verwenden.
+                </CardDescription>
+              </div>
+              {emailInfo && (
+                <Badge
+                  variant="outline"
+                  className={`text-[10px] ${
+                    emailInfo.enabled
+                      ? STATUS_TONE.active
+                      : emailInfo.meta_override
+                      ? STATUS_TONE.medium
+                      : STATUS_TONE.quiet
+                  }`}
+                >
+                  {emailInfo.enabled
+                    ? "aktiv"
+                    : emailInfo.meta_override
+                    ? "konfiguriert"
+                    : "deaktiviert"}
+                </Badge>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between rounded-lg border p-3 bg-muted/10">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-sm font-semibold">IMAP-Monitor aktivieren</span>
+                <span className="text-xs text-muted-foreground">
+                  {emailInfo?.restart_required
+                    ? "Gespeichert — wird beim nächsten Restart geladen."
+                    : "OpenAI muss aktiv sein (für die Klassifizierung der Mails)."}
+                </span>
+              </div>
+              <Switch
+                checked={emailInfo?.enabled ?? false}
+                onCheckedChange={(checked) => saveEmail(checked)}
+                disabled={savingEmail}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-muted-foreground uppercase">IMAP-Host</label>
+                <Input
+                  placeholder="imap.gmail.com:993"
+                  value={emailDraft.imap_host}
+                  onChange={(e) => { setEmailTouched(true); setEmailDraft(prev => ({ ...prev, imap_host: e.target.value })) }}
+                  className="font-mono text-xs"
+                />
+                <p className="text-[10px] text-muted-foreground">host:port, implizites TLS.</p>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-muted-foreground uppercase">Postfach</label>
+                <Input
+                  placeholder="INBOX"
+                  value={emailDraft.mailbox}
+                  onChange={(e) => { setEmailTouched(true); setEmailDraft(prev => ({ ...prev, mailbox: e.target.value })) }}
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-muted-foreground uppercase">Benutzername</label>
+                <Input
+                  placeholder="bot@example.com"
+                  value={emailDraft.username}
+                  onChange={(e) => { setEmailTouched(true); setEmailDraft(prev => ({ ...prev, username: e.target.value })) }}
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-muted-foreground uppercase">App-Passwort</label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    type="password"
+                    placeholder={emailInfo?.password_set ? "••••••••  (neu eingeben zum Ändern)" : "App-Passwort eingeben"}
+                    value={emailDraft.password}
+                    onChange={(e) => { setEmailTouched(true); setEmailDraft(prev => ({ ...prev, password: e.target.value })) }}
+                    className="pl-9 font-mono text-xs"
+                    autoComplete="new-password"
+                  />
+                </div>
+                <p className={`text-[10px] ${emailInfo?.password_set ? "text-muted-foreground" : "text-destructive"}`}>
+                  {emailInfo?.password_set
+                    ? emailInfo.password_source === "meta"
+                      ? "Gesetzt und AES-verschlüsselt in der Datenbank."
+                      : "Gesetzt via EMAIL_PASSWORD — wird beim nächsten Start verschlüsselt übernommen."
+                    : "Fehlt — hier eingeben oder EMAIL_PASSWORD setzen."}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-muted-foreground uppercase">Lookback (Std.)</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={720}
+                  value={emailDraft.lookback_hours}
+                  onChange={(e) => { setEmailTouched(true); setEmailDraft(prev => ({ ...prev, lookback_hours: Number(e.target.value) })) }}
+                  className="font-mono text-xs"
+                />
+                <p className="text-[10px] text-muted-foreground">Wie weit zurück geprüft wird (Standard: 72).</p>
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <label className="text-xs font-bold text-muted-foreground uppercase">From-Filter (optional)</label>
+                <Input
+                  placeholder="@immobilienscout24.de, no-reply@is24.de"
+                  value={emailDraft.senders}
+                  onChange={(e) => { setEmailTouched(true); setEmailDraft(prev => ({ ...prev, senders: e.target.value })) }}
+                  className="font-mono text-xs"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Komma-getrennt, Substring-Match auf <code className="font-mono">From:</code>. Leer = IS24-Standardliste.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 pt-2 border-t border-border/40">
+              <span className="text-[10px] text-muted-foreground">
+                {emailInfo?.restart_required
+                  ? "Änderungen sind gespeichert. Restart erforderlich, damit der Monitor sie übernimmt."
+                  : emailInfo?.meta_override
+                  ? "Konfiguration aus der Datenbank — überschreibt .env-Werte."
+                  : "Konfiguration aus .env / config.yaml."}
+              </span>
+              <Button
+                onClick={() => saveEmail(emailInfo?.enabled ?? false)}
+                disabled={savingEmail}
+                size="sm"
+                className="h-8 px-4 font-semibold gap-1.5"
+              >
+                <Save className="h-3.5 w-3.5" />
+                {savingEmail ? "Speichert…" : "Speichern"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+        )}
+
         {view === "profiles" && (
         <Card className="shadow-sm border border-border/60">
           <CardHeader className="flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between">
@@ -1448,10 +2028,60 @@ export default function DashboardPage() {
             </div>
           </CardHeader>
           <CardContent>
+            {/* Bulk-action toolbar — visible only when at least one row is
+                selected. Sticks just above the table so it stays in sight as
+                the user scrolls long result lists. */}
+            {selectedIds.size > 0 && (
+              <div className="sticky top-0 z-10 -mt-2 mb-3 flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/40 backdrop-blur px-3 py-2 text-xs">
+                <span className="font-semibold">
+                  {selectedIds.size} ausgewählt
+                </span>
+                <span className="text-muted-foreground hidden sm:inline">·</span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1.5 text-xs"
+                  disabled={bulkBusy}
+                  onClick={() => bulkSetSkipped(true)}
+                >
+                  <EyeOff className="h-3.5 w-3.5" /> Ignorieren
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1.5 text-xs"
+                  disabled={bulkBusy}
+                  onClick={() => bulkSetSkipped(false)}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" /> Wieder aufnehmen
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 ml-auto text-xs text-muted-foreground"
+                  onClick={clearSelection}
+                  disabled={bulkBusy}
+                >
+                  Auswahl löschen
+                </Button>
+              </div>
+            )}
             <div className="rounded-md border overflow-hidden">
               <Table>
                 <TableHeader className="bg-muted/30">
                   <TableRow>
+                    <TableHead className="w-[40px]">
+                      <input
+                        type="checkbox"
+                        aria-label="Alle sichtbaren auswählen"
+                        checked={allVisibleSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = someVisibleSelected
+                        }}
+                        onChange={toggleSelectAllVisible}
+                        className="h-4 w-4 cursor-pointer accent-foreground"
+                      />
+                    </TableHead>
                     <TableHead className="w-[140px]">Datum</TableHead>
                     <TableHead>Titel / Adresse</TableHead>
                     <TableHead className="w-[120px]">Preis</TableHead>
@@ -1462,12 +2092,42 @@ export default function DashboardPage() {
                 </TableHeader>
                 <TableBody>
                   {filteredListings.length > 0 ? (
-                    filteredListings.map((l) => (
+                    filteredListings.map((l) => {
+                      const isSelected = selectedIds.has(l.id)
+                      return (
                       <TableRow
                         key={l.id}
-                        className="cursor-pointer hover:bg-muted/30 transition-colors"
+                        data-selected={isSelected ? "true" : undefined}
+                        className={`cursor-pointer hover:bg-muted/30 transition-colors ${l.skipped ? "opacity-50" : ""} ${isSelected ? "bg-muted/40" : ""}`}
                         onClick={() => setSelectedListing(l)}
+                        onContextMenu={(e) => {
+                          e.preventDefault()
+                          // Right-clicking outside the current selection
+                          // resets it to just this row so the menu's "N
+                          // selected" semantics are never surprising.
+                          if (!isSelected) {
+                            setSelectedIds(new Set([l.id]))
+                            setLastSelectedId(l.id)
+                          }
+                          setContextMenu({ x: e.clientX, y: e.clientY, listing: l })
+                        }}
                       >
+                        <TableCell
+                          className="w-[40px]"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`Wohnung ${l.id} auswählen`}
+                            checked={isSelected}
+                            onChange={() => { /* handled via onClick to capture shiftKey */ }}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              toggleRowSelected(l.id, e.shiftKey)
+                            }}
+                            className="h-4 w-4 cursor-pointer accent-foreground"
+                          />
+                        </TableCell>
                         <TableCell className="text-xs text-muted-foreground font-mono">
                           {formatDate(l.created_at)}
                         </TableCell>
@@ -1531,16 +2191,35 @@ export default function DashboardPage() {
                                 <CheckCircle2 className="h-3 w-3" /> kontaktiert
                               </Badge>
                             )}
-                            {!l.notified && !l.contacted && !l.exclusive_expose && (
+                            {l.skipped && (
+                              <Badge
+                                variant="outline"
+                                className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.subtle}`}
+                                title="Manuell ignoriert — wird nicht automatisch kontaktiert"
+                              >
+                                <EyeOff className="h-3 w-3" /> ignoriert
+                              </Badge>
+                            )}
+                            {l.rejected && (
+                              <Badge
+                                variant="outline"
+                                className={`h-6 gap-1 text-[10px] font-bold px-2 rounded-full ${STATUS_TONE.quiet}`}
+                                title="Approval abgelehnt — Rechtsklick → Verwerfung rückgängig"
+                              >
+                                <X className="h-3 w-3" /> verworfen
+                              </Badge>
+                            )}
+                            {!l.notified && !l.contacted && !l.exclusive_expose && !l.skipped && !l.rejected && (
                               <span className="text-xs text-muted-foreground italic px-2">Kein Status</span>
                             )}
                           </div>
                         </TableCell>
                       </TableRow>
-                    ))
+                      )
+                    })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={6} className="h-24 text-center text-muted-foreground text-sm">
+                      <TableCell colSpan={7} className="h-24 text-center text-muted-foreground text-sm">
                         {searchQuery || profileFilter !== "all" ? "Keine passenden Wohnungen gefunden." : "Noch keine Wohnungen gefunden."}
                       </TableCell>
                     </TableRow>
@@ -1552,13 +2231,237 @@ export default function DashboardPage() {
         </Card>
         )}
 
+        {view === "queue" && (
+        <div className="space-y-6">
+          <Card className="shadow-sm border border-border/60">
+            <CardHeader className="pb-4">
+              <CardTitle className="text-md font-bold tracking-tight">Aktuell in Telegram</CardTitle>
+              <CardDescription className="text-xs">
+                {queue.pending
+                  ? "Der Bot wartet auf deine Entscheidung. Solange das offen ist, wird keine weitere Wohnung vorgeschlagen."
+                  : "Aktuell keine Wohnung im Approval. Der nächste Vorschlag startet beim nächsten Poll-Zyklus."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {queue.pending ? (
+                <div className="space-y-4">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="space-y-1">
+                      <div className="font-semibold leading-snug">{esc(queue.pending.listing.title)}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {esc(queue.pending.listing.address || queue.pending.listing.city || "–")}
+                        {queue.pending.listing.search_profile_name ? ` · ${esc(queue.pending.listing.search_profile_name)}` : ""}
+                      </div>
+                      <div className="text-xs text-muted-foreground tabular-nums">
+                        {typeof queue.pending.listing.price === "number" ? `${queue.pending.listing.price.toLocaleString("de-DE")} €` : "–"}
+                        {typeof queue.pending.listing.rooms === "number" ? ` · ${queue.pending.listing.rooms} Zi` : ""}
+                        {typeof queue.pending.listing.area === "number" ? ` · ${queue.pending.listing.area} m²` : ""}
+                      </div>
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                        Vorgeschlagen: {formatDate(queue.pending.created_at)}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        className="gap-2"
+                        onClick={() => decidePending("approve")}
+                        disabled={queueBusy !== null}
+                      >
+                        <Check className="h-4 w-4" />
+                        {queueBusy === "approve" ? "Sende…" : "Senden"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-2"
+                        onClick={() => decidePending("reject")}
+                        disabled={queueBusy !== null}
+                      >
+                        <X className="h-4 w-4" />
+                        {queueBusy === "reject" ? "Verwerfe…" : "Verwerfen"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        asChild
+                      >
+                        <a href={queue.pending.listing.url} target="_blank" rel="noopener noreferrer" className="gap-1 inline-flex items-center">
+                          <ExternalLink className="h-4 w-4" />
+                          IS24
+                        </a>
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="rounded-md border bg-muted/20 p-3">
+                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Generierte Nachricht</div>
+                    <pre className="whitespace-pre-wrap text-xs font-mono leading-relaxed">{queue.pending.message}</pre>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-sm text-muted-foreground py-6 text-center">
+                  Keine offene Approval-Karte. ✅ / ❌ via Telegram oder hier.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="shadow-sm border border-border/60">
+            <CardHeader className="pb-4">
+              <CardTitle className="text-md font-bold tracking-tight">Als nächstes in der Queue</CardTitle>
+              <CardDescription className="text-xs">
+                {queue.next.length === 0
+                  ? "Keine weiteren Wohnungen warten. Sobald der nächste Poll-Lauf neue findet, landen sie hier."
+                  : `${queue.next.length} Wohnung${queue.next.length === 1 ? "" : "en"} in der Reihenfolge, wie der Bot sie vorschlagen wird.`}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="rounded-md border overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-muted/30">
+                    <TableRow>
+                      <TableHead className="w-[60px]">#</TableHead>
+                      <TableHead>Wohnung</TableHead>
+                      <TableHead className="w-[140px]">Profil</TableHead>
+                      <TableHead className="w-[120px] text-right">Preis</TableHead>
+                      <TableHead className="w-[100px] text-right">Zimmer/m²</TableHead>
+                      <TableHead className="w-[140px]">Gefunden</TableHead>
+                      <TableHead className="w-[80px]"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {queue.next.length > 0 ? (
+                      queue.next.map((l, i) => (
+                        <TableRow key={l.id} className="hover:bg-muted/10 transition-colors">
+                          <TableCell className="font-mono text-xs text-muted-foreground">{i + 1}</TableCell>
+                          <TableCell>
+                            <div className="font-medium leading-tight">{esc(l.title)}</div>
+                            <div className="text-xs text-muted-foreground">{esc(l.address || l.city || "–")}</div>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{esc(l.search_profile_name || "–")}</TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {typeof l.price === "number" ? `${l.price.toLocaleString("de-DE")} €` : "–"}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
+                            {typeof l.rooms === "number" ? `${l.rooms} Zi` : "–"}
+                            {typeof l.area === "number" ? ` / ${l.area} m²` : ""}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{formatDate(l.created_at)}</TableCell>
+                          <TableCell className="text-right">
+                            <Button variant="ghost" size="sm" asChild>
+                              <a href={l.url} target="_blank" rel="noopener noreferrer">
+                                <ExternalLink className="h-4 w-4" />
+                              </a>
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    ) : (
+                      <TableRow>
+                        <TableCell colSpan={7} className="h-24 text-center text-muted-foreground text-sm">
+                          Keine wartenden Wohnungen.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+        )}
+
         {view === "inbox" && (
         <Card className="shadow-sm border border-border/60">
           <CardHeader className="pb-4">
-            <CardTitle className="text-md font-bold tracking-tight">Posteingang</CardTitle>
-            <CardDescription className="text-xs">
-              {inbox.length} IS24-E-Mails — markiert sind echte Anbieter-Antworten, die nicht über den IS24-Chat kamen.
-            </CardDescription>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1">
+                <CardTitle className="text-md font-bold tracking-tight">Posteingang</CardTitle>
+                <CardDescription className="text-xs">
+                  {inbox.length}{inboxLandlordOnly ? " gefilterte" : ""} IS24-E-Mails — markiert sind echte
+                  Anbieter-Antworten, die nicht über den IS24-Chat kamen.
+                </CardDescription>
+              </div>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                  <Switch
+                    checked={inboxLandlordOnly}
+                    onCheckedChange={setInboxLandlordOnly}
+                  />
+                  Nur Anbieter-Antworten
+                </label>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void triggerInboxScan()}
+                  disabled={inboxScanning}
+                >
+                  {inboxScanning ? "Scanne…" : "Jetzt scannen"}
+                </Button>
+              </div>
+            </div>
+            {/* Scan progress / result panel. Lives in the header so it stays
+                visible even when the table below scrolls. Spinner shows while
+                the POST is in flight; result counts and per-mail errors land
+                here once the call returns. */}
+            {(inboxScanning || inboxScanResult || inboxScanError) && (
+              <div className="mt-3 rounded-md border bg-muted/20 px-3 py-2 text-xs">
+                {inboxScanning && (
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
+                    Scanne IMAP-Postfach (max. 30 s)…
+                  </div>
+                )}
+                {!inboxScanning && inboxScanResult && (
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono">
+                      <span><strong>{inboxScanResult.inspected}</strong> im Zeitfenster</span>
+                      <span className="text-muted-foreground">·</span>
+                      <span>{inboxScanResult.fetched} von IS24-Absendern</span>
+                      <span className="text-muted-foreground">·</span>
+                      <span>{inboxScanResult.classified} neu klassifiziert</span>
+                      <span className="text-muted-foreground">·</span>
+                      <span className={inboxScanResult.landlord_replies > 0 ? "font-bold text-emerald-600" : ""}>
+                        {inboxScanResult.landlord_replies} Vermieter-Antwort{inboxScanResult.landlord_replies === 1 ? "" : "en"}
+                      </span>
+                      <span className="text-muted-foreground">·</span>
+                      <span>{formatScanDuration(inboxScanResult.duration_ms)}</span>
+                    </div>
+                    {/* Inspected>0 but Fetched=0 = the user has new mail, none of it from the
+                        configured senders. This is the dominant "why didn't anything happen"
+                        case so we explain it inline instead of leaving the user to guess. */}
+                    {inboxScanResult.inspected > 0 && inboxScanResult.fetched === 0 && (
+                      <div className="text-amber-700 dark:text-amber-400">
+                        Im Zeitfenster lagen {inboxScanResult.inspected} neue Mail{inboxScanResult.inspected === 1 ? "" : "s"},
+                        aber keine passte zum aktuellen Absender-Filter
+                        {inboxScanResult.senders && inboxScanResult.senders.length > 0 && (
+                          <> <span className="font-mono">[{inboxScanResult.senders.join(", ")}]</span></>
+                        )}
+                        . Filter in den Einstellungen anpassen.
+                      </div>
+                    )}
+                    {inboxScanResult.errors && inboxScanResult.errors.length > 0 && (
+                      <div className="space-y-0.5 text-destructive">
+                        <div className="font-semibold">
+                          {inboxScanResult.errors.length} Mail-Fehler:
+                        </div>
+                        <ul className="list-inside list-disc pl-1 font-mono">
+                          {inboxScanResult.errors.map((e, i) => (
+                            <li key={i}>{e}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {!inboxScanning && inboxScanError && !inboxScanResult && (
+                  <div className="text-destructive">
+                    <span className="font-semibold">Scan fehlgeschlagen:</span>{" "}
+                    <span className="font-mono">{inboxScanError}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </CardHeader>
           <CardContent>
             <div className="rounded-md border overflow-hidden">

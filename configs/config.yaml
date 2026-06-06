@@ -1,4 +1,4 @@
-poll_interval: 5m
+poll_interval: 30m
 database_path: data/immobot.db
 log_level: info
 
@@ -52,7 +52,7 @@ email:
   enabled: false              # Set true or via EMAIL_ENABLED env var
   imap_host: ""               # host:port, implicit TLS, e.g. imap.gmail.com:993 (EMAIL_IMAP_HOST)
   username: ""                # mailbox login (EMAIL_USERNAME)
-  password: ""                # app password — set via EMAIL_PASSWORD env var, not here
+  password: ""                # app password — set via EMAIL_PASSWORD env or dashboard (AES-encrypted in DB)
   mailbox: "INBOX"            # folder to scan (EMAIL_MAILBOX)
   lookback: 72h               # coarse server-side date window per poll
   senders: []                 # From-substring filters; empty → built-in IS24 defaults
@@ -136,7 +136,12 @@ campaigns:
 
       Gib NUR die 2–3 Sätze über die Wohnung zurück, ohne Anführungszeichen,
       ohne Aufzählung.
-    # contact_profile:
-    #   salutation: MALE
-    #   first_name: Julian
-    #   ...  (komplett ausfüllen, um globales Profil zu überschreiben)
+    # WG-Bewerbung: zwei Erwachsene, gemeinsames Haushaltsnetto 9000
+    # (freitext). Falls IS24 statt freitext ein Range-Select liefert, gibt der
+    # LLM-Fallback die höchste verfügbare Range zurück (in der Praxis ">5000").
+    # Der Rest des Profils kommt per field-by-field-Merge aus dem globalen
+    # contact.profile (über die CONTACT_*-Env-Variablen) — nur Felder, die hier
+    # nicht-leer / nicht-0 sind, überschreiben global.
+    contact_profile:
+      adults: 2
+      income: 9000

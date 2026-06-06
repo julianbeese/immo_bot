@@ -5,9 +5,35 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/julianbeese/immo_bot/internal/domain"
 )
+
+// ScanResult summarizes a single Poll. Returned to dashboard callers so the
+// "Jetzt scannen"-Button can show counts instead of a bare ok/error. Inspected
+// vs Fetched distinguishes "nothing new in the mailbox" from "lots arrived but
+// none matched the configured IS24 sender filter".
+type ScanResult struct {
+	Inspected       int      `json:"inspected"`        // UIDs > watermark in date window (raw, before sender filter)
+	Fetched         int      `json:"fetched"`          // passed the sender filter — these went through classification
+	AlreadyKnown    int      `json:"already_known"`    // dedupe hits — classifier skipped
+	Classified      int      `json:"classified"`       // new mails sent through the LLM
+	LandlordReplies int      `json:"landlord_replies"` // classifier said is_landlord_reply=true
+	Notified        int      `json:"notified"`         // Telegram pushes that succeeded
+	Senders         []string `json:"senders"`          // active sender substring filter (helps debug Inspected>0 / Fetched=0)
+	Errors          []string `json:"errors"`           // per-mail processing errors (truncated)
+	DurationMs      int64    `json:"duration_ms"`      // wall-clock for the whole poll
+}
+
+// processOutcome is the per-message tally returned by process(); Poll
+// aggregates these into a ScanResult.
+type processOutcome struct {
+	Skipped       bool
+	Classified    bool
+	LandlordReply bool
+	Notified      bool
+}
 
 // Classification is the AI verdict for one IS24 mail.
 type Classification struct {
@@ -61,20 +87,45 @@ func NewMonitor(client *Client, classifier Classifier, store Store, notifier Not
 
 // Poll fetches new IS24 mails since the stored UID watermark, classifies the
 // ones not seen before, persists them, and notifies on genuine landlord
-// replies. It is safe to call every poll cycle; Message-ID dedupe guards the
+// replies. The returned ScanResult is always populated — even on a fetch
+// error its DurationMs reflects the time spent. Message-ID dedupe guards the
 // (paid) classifier so it only runs on truly new mail.
-func (m *Monitor) Poll(ctx context.Context) error {
-	afterUID := m.loadWatermark(ctx)
+func (m *Monitor) Poll(ctx context.Context) (res ScanResult, err error) {
+	// Named return values let the deferred timing assignment actually reach
+	// the caller — a non-named `res` would be copied at each `return res, …`
+	// before the defer fires, leaving DurationMs at 0.
+	start := time.Now()
+	defer func() { res.DurationMs = time.Since(start).Milliseconds() }()
 
-	msgs, highUID, err := m.client.FetchSince(ctx, afterUID)
+	afterUID := m.loadWatermark(ctx)
+	res.Senders = m.client.Senders()
+
+	msgs, inspected, highUID, err := m.client.FetchSince(ctx, afterUID)
+	res.Inspected = inspected
 	if err != nil {
-		return fmt.Errorf("fetch mails: %w", err)
+		return res, fmt.Errorf("fetch mails: %w", err)
 	}
+	res.Fetched = len(msgs)
 
 	for _, msg := range msgs {
-		if err := m.process(ctx, msg); err != nil {
-			m.logger.Error("inbox message processing failed", "message_id", msg.MessageID, "error", err)
+		outcome, perr := m.process(ctx, msg)
+		if perr != nil {
+			m.logger.Error("inbox message processing failed", "message_id", msg.MessageID, "error", perr)
+			res.Errors = append(res.Errors, truncateForDisplay(perr.Error()))
 			// keep going; one bad mail shouldn't block the rest
+			continue
+		}
+		switch {
+		case outcome.Skipped:
+			res.AlreadyKnown++
+		case outcome.Classified:
+			res.Classified++
+			if outcome.LandlordReply {
+				res.LandlordReplies++
+			}
+			if outcome.Notified {
+				res.Notified++
+			}
 		}
 	}
 
@@ -85,24 +136,29 @@ func (m *Monitor) Poll(ctx context.Context) error {
 			m.logger.Warn("failed to persist email UID watermark", "error", err)
 		}
 	}
-	return nil
+	return res, nil
 }
 
-func (m *Monitor) process(ctx context.Context, msg Message) error {
+func (m *Monitor) process(ctx context.Context, msg Message) (processOutcome, error) {
+	var out processOutcome
+
 	if msg.MessageID != "" {
 		exists, err := m.store.InboxExists(ctx, msg.MessageID)
 		if err != nil {
-			return fmt.Errorf("dedupe check: %w", err)
+			return out, fmt.Errorf("dedupe check: %w", err)
 		}
 		if exists {
-			return nil
+			out.Skipped = true
+			return out, nil
 		}
 	}
 
 	cls, err := m.classifier.Classify(ctx, msg)
 	if err != nil {
-		return fmt.Errorf("classify: %w", err)
+		return out, fmt.Errorf("classify: %w", err)
 	}
+	out.Classified = true
+	out.LandlordReply = cls.IsLandlordReply
 
 	rec := &domain.InboxMessage{
 		MessageID:       msg.MessageID,
@@ -129,16 +185,27 @@ func (m *Monitor) process(ctx context.Context, msg Message) error {
 			m.logger.Warn("inbox notification failed", "error", err)
 		} else {
 			rec.Notified = true
+			out.Notified = true
 		}
 	}
 
 	if err := m.store.CreateInboxMessage(ctx, rec); err != nil {
-		return fmt.Errorf("persist: %w", err)
+		return out, fmt.Errorf("persist: %w", err)
 	}
 
 	m.logger.Info("inbox message processed",
 		"from", msg.From, "landlord_reply", cls.IsLandlordReply, "is24_id", cls.IS24ID)
-	return nil
+	return out, nil
+}
+
+// truncateForDisplay shortens a message to ~200 runes so the dashboard can
+// render a per-mail error without an unbounded payload.
+func truncateForDisplay(s string) string {
+	r := []rune(s)
+	if len(r) <= 200 {
+		return s
+	}
+	return string(r[:200]) + "…"
 }
 
 func (m *Monitor) watermarkKey() string { return metaLastUIDPrefix + m.client.mailbox }

@@ -2,8 +2,10 @@ package contact
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -12,6 +14,53 @@ import (
 	"github.com/julianbeese/immo_bot/internal/antidetect"
 	"github.com/julianbeese/immo_bot/internal/domain"
 )
+
+// ErrWAFChallenge is returned when the IS24 "Ich bin kein Roboter" challenge
+// page did not clear within the polling budget. Mirrors the sentinel in the
+// is24 scraper package; kept local so the contact package stays decoupled.
+var ErrWAFChallenge = errors.New("is24 WAF challenge did not pass")
+
+// contactFormSelector is the CSS selector union used to discover the contact
+// form on an IS24 expose. The form varies wildly between listings:
+// data-qa="contactForm" on the legacy variant, contactForm id on some SPA
+// renders, plus name/action/data-testid attributes containing "contact" as
+// catch-alls. The case-insensitive [attr*=... i] match catches "contactForm",
+// "contact-form", "ContactFormular", etc. without listing each variant. If a
+// listing still misses every selector, the debug dump captures the page so we
+// can add the missing variant explicitly.
+const contactFormSelector = `form[data-qa="contactForm"], ` +
+	`form[id*="ontact" i], ` +
+	`form[name*="ontact" i], ` +
+	`form[action*="ontact" i], ` +
+	`form[data-testid*="ontact" i], ` +
+	`.contact-form, ` +
+	`#contactForm`
+
+// waitWAFCleared polls the current page title until the AWS-WAF challenge
+// clears, with a 30s budget. Used between Navigate and WaitVisible: without
+// it, a challenged page hangs WaitVisible until the outer context expires,
+// producing a 2-minute "deadline exceeded" with no signal as to the root
+// cause. Mirrors the logic in internal/scraper/is24/browser.go.
+func waitWAFCleared(ctx context.Context) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var title string
+		if err := chromedp.Title(&title).Do(ctx); err != nil {
+			return err
+		}
+		if title != "Ich bin kein Roboter - ImmobilienScout24" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return ErrWAFChallenge
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
 
 // Profile contains applicant information
 type Profile struct {
@@ -138,14 +187,27 @@ func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message
 		}
 	}
 
-	// Phase 1: navigate and wait for the form. If this fails the page is not
-	// reachable (WAF, cookie, bad URL) — the LLM fallback can't help, so abort.
+	// Phase 1: navigate, let any AWS-WAF challenge clear, capture the rendered
+	// HTML to memory, then wait for the form. The HTML capture happens BEFORE
+	// WaitVisible so a subsequent timeout still leaves a usable dump in memory
+	// — chromedp.OuterHTML wouldn't work after the outer context expires.
+	var preWaitHTML string
 	if err := chromedp.Run(browserCtx,
 		s.setCookies(),
 		chromedp.Navigate(contactURL),
 		chromedp.Sleep(s.behavior.ThinkPause()),
-		chromedp.WaitVisible(`form[data-qa="contactForm"], .contact-form, #contactForm`, chromedp.ByQuery),
+		chromedp.ActionFunc(waitWAFCleared),
+		// Let the SPA render the in-page contact view (#/basicContact/email)
+		// before snapshotting. Two seconds matches the empirical render budget
+		// observed on healthy fetches.
+		chromedp.Sleep(2*time.Second),
+		chromedp.OuterHTML("html", &preWaitHTML, chromedp.ByQuery),
+		chromedp.WaitVisible(contactFormSelector, chromedp.ByQuery),
 	); err != nil {
+		// Write whatever was captured before WaitVisible blocked. No chromedp
+		// call here — the string is already in process memory, so an expired
+		// browser context can't take the diagnostic away from us.
+		s.writeDebugHTML(listing.IS24ID, preWaitHTML)
 		return fmt.Errorf("contact form not reachable: %w", err)
 	}
 
@@ -175,6 +237,31 @@ func (s *Submitter) Submit(ctx context.Context, listing *domain.Listing, message
 	}
 	s.logger.Info("contact submitted via llm fallback", "is24_id", listing.IS24ID)
 	return nil
+}
+
+// writeDebugHTML persists an in-memory HTML snapshot for post-mortem when the
+// form-reachability check failed. No chromedp work happens here — the caller
+// captured the OuterHTML before WaitVisible blocked, so an expired browser
+// context can't strip the diagnostic. Gated by DEBUG_HTML=1.
+func (s *Submitter) writeDebugHTML(is24ID, html string) {
+	if os.Getenv("DEBUG_HTML") != "1" {
+		return
+	}
+	if html == "" {
+		s.logger.Warn("debug dump skipped: no captured HTML", "is24_id", is24ID)
+		return
+	}
+	if err := os.MkdirAll("data/debug", 0o755); err != nil {
+		s.logger.Warn("debug dump mkdir failed", "error", err)
+		return
+	}
+	path := fmt.Sprintf("data/debug/contact_%s_%d.html", is24ID, time.Now().Unix())
+	if err := os.WriteFile(path, []byte(html), 0o644); err != nil {
+		s.logger.Warn("debug dump write failed", "path", path, "error", err)
+		return
+	}
+	s.logger.Warn("contact form not reachable; dumped page HTML for inspection",
+		"is24_id", is24ID, "path", path, "bytes", len(html))
 }
 
 func (s *Submitter) setCookies() chromedp.ActionFunc {

@@ -15,11 +15,16 @@ import (
 	"github.com/julianbeese/immo_bot/internal/filter"
 	"github.com/julianbeese/immo_bot/internal/messenger"
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
+	"github.com/julianbeese/immo_bot/internal/secrets"
 )
 
 // IS24Client interface for scraping
 type IS24Client interface {
-	Search(ctx context.Context, profile *domain.SearchProfile) ([]domain.Listing, error)
+	// Search returns listings for a profile. existsFn, if non-nil, is invoked
+	// with each candidate IS24 ID — implementations that paginate stop at the
+	// first hit (results are sorted newest-first, so everything past a known
+	// ID is also already stored).
+	Search(ctx context.Context, profile *domain.SearchProfile, existsFn func(is24ID string) bool) ([]domain.Listing, error)
 	FetchExpose(ctx context.Context, is24ID string) (*domain.Listing, error)
 	// SetCookie applies a new IS24 session cookie at runtime so cookies can be
 	// rotated without restarting the bot. Implementations may return errors
@@ -51,6 +56,10 @@ type Scheduler struct {
 	enhancer  MessageEnhancer
 	contacter *contact.Submitter
 	emailMon  *email.Monitor // optional inbox monitor (nil = disabled)
+	// cookieEnc encrypts the IS24 cookie before it is persisted to the meta
+	// table. nil = persist as plaintext (legacy path, kept so tests don't need
+	// to wire crypto). Set via SetCookieEncrypter from main.go.
+	cookieEnc *secrets.Encrypter
 	logger    *slog.Logger
 
 	// Callbacks to check contact mode
@@ -146,6 +155,11 @@ func NewScheduler(
 // cycle also scans for IS24-related provider replies.
 func (s *Scheduler) SetEmailMonitor(m *email.Monitor) { s.emailMon = m }
 
+// SetCookieEncrypter installs the AES-GCM encrypter used to wrap the IS24
+// cookie before it is written to the meta table. Pass nil to disable (cookie
+// is then persisted in cleartext — only used in tests).
+func (s *Scheduler) SetCookieEncrypter(e *secrets.Encrypter) { s.cookieEnc = e }
+
 // SetAutoContactCallback sets the callback to check if auto-contact is enabled
 func (s *Scheduler) SetAutoContactCallback(fn func() bool) {
 	s.isAutoContactEnabled = fn
@@ -193,18 +207,30 @@ func (s *Scheduler) currentPollInterval() time.Duration {
 	if s.cfg.PollInterval > 0 {
 		return s.cfg.PollInterval
 	}
-	return 5 * time.Minute
+	return 30 * time.Minute
 }
 
 // SetIS24Cookie hot-reloads the IS24 cookie: applies it to the client (so the
 // next scrape uses it), persists it to the meta table (so it survives
-// restarts), and clears the cookie-expired warning state. Safe to call from
-// any goroutine.
+// restarts), and clears the cookie-expired warning state. The persisted value
+// is AES-GCM encrypted when a cookie encrypter is wired; otherwise it falls
+// back to plaintext (test-only). Safe to call from any goroutine.
 func (s *Scheduler) SetIS24Cookie(ctx context.Context, cookie string) error {
 	if err := s.client.SetCookie(cookie); err != nil {
 		return fmt.Errorf("apply cookie to client: %w", err)
 	}
-	if err := s.repo.SetMeta(ctx, sqlite.MetaIS24Cookie, cookie); err != nil {
+	stored := cookie
+	if s.cookieEnc != nil {
+		enc, err := s.cookieEnc.Encrypt(cookie)
+		if err != nil {
+			// Encryption failure is fatal here: persisting the plaintext as a
+			// fallback would defeat the purpose. The in-memory cookie is still
+			// good for the current process.
+			return fmt.Errorf("encrypt IS24 cookie: %w", err)
+		}
+		stored = enc
+	}
+	if err := s.repo.SetMeta(ctx, sqlite.MetaIS24Cookie, stored); err != nil {
 		// Logged, not fatal — the in-memory cookie is already updated. Without
 		// persistence the bot still scrapes correctly until the next restart.
 		s.logger.Warn("failed to persist IS24 cookie override", "error", err)
@@ -368,8 +394,16 @@ func (s *Scheduler) poll(ctx context.Context) error {
 	// hours: it only reads mail and alerts on genuine inbound replies, which are
 	// time-sensitive and low-volume (the AI classifier filters out noise).
 	if s.emailMon != nil {
-		if err := s.emailMon.Poll(ctx); err != nil {
+		// Periodic poll: we log the result counts but do not surface them — the
+		// dashboard's manual "Jetzt scannen" button uses the same Poll method
+		// and consumes the structured ScanResult.
+		if res, err := s.emailMon.Poll(ctx); err != nil {
 			s.logger.Error("email monitor poll failed", "error", err)
+		} else if res.Fetched > 0 {
+			s.logger.Info("inbox poll summary",
+				"fetched", res.Fetched, "classified", res.Classified,
+				"landlord_replies", res.LandlordReplies,
+				"errors", len(res.Errors), "duration_ms", res.DurationMs)
 		}
 	}
 
@@ -437,8 +471,21 @@ func (s *Scheduler) checkCookieHealth(ctx context.Context, profileCount, totalRa
 func (s *Scheduler) processProfile(ctx context.Context, profile *domain.SearchProfile) (int, error) {
 	s.logger.Info("searching", "profile", profile.Name, "city", profile.City)
 
-	// Search IS24
-	listings, err := s.client.Search(ctx, profile)
+	// Stop pagination at the first listing we've already stored. Results come
+	// back sorted newest-first, so a known ID means everything below it is
+	// known too — no point fetching further pages. Errors here are swallowed
+	// (treated as "unknown") so a transient DB blip degrades to the old
+	// scan-all-5-pages behaviour rather than breaking the poll.
+	existsFn := func(is24ID string) bool {
+		exists, err := s.repo.ListingExists(ctx, is24ID)
+		if err != nil {
+			s.logger.Warn("existence check during search failed", "is24_id", is24ID, "error", err)
+			return false
+		}
+		return exists
+	}
+
+	listings, err := s.client.Search(ctx, profile, existsFn)
 	if err != nil {
 		return 0, err
 	}
@@ -779,15 +826,26 @@ func (s *Scheduler) notifyError(ctx context.Context, err error) {
 	}
 }
 
-// approvalRejectCooldown is the minimum age of a rejection before the same
-// listing becomes eligible for a new approval suggestion. Keeps the bot from
-// re-proposing the same listing immediately after ❌, but doesn't trap the
-// listing forever — useful when the user wants a regenerated message later.
-const approvalRejectCooldown = 6 * time.Hour
+// approvalExpireAfter is the maximum age a pending_approval row may keep
+// blocking the strict-sequential queue. Past this, the row is auto-rejected so
+// new suggestions can flow again. Set conservatively: longer than any
+// reasonable response window, short enough to recover from a lost Telegram
+// callback or a bot restart on the same day.
+const approvalExpireAfter = 3 * time.Hour
 
 // sendApprovalRequests proposes the next eligible listing in approval mode.
 // Strict sequential: skip the cycle if any pending_approval is in flight.
 func (s *Scheduler) sendApprovalRequests(ctx context.Context) error {
+	// Garbage-collect approvals the user never decided on. Without this, a
+	// single lost Telegram callback (bot restart, expired message, dropped
+	// network) can wedge the queue forever — the symptom that drove this guard.
+	if expired, err := s.repo.ExpireStalePendingApprovals(ctx, approvalExpireAfter); err != nil {
+		s.logger.Warn("expire stale approvals failed", "error", err)
+	} else if expired > 0 {
+		s.logger.Info("auto-expired stale pending approvals",
+			"count", expired, "max_age", approvalExpireAfter)
+	}
+
 	pending, err := s.repo.CountPendingApprovals(ctx)
 	if err != nil {
 		return fmt.Errorf("count pending approvals: %w", err)
@@ -797,7 +855,7 @@ func (s *Scheduler) sendApprovalRequests(ctx context.Context) error {
 		return nil
 	}
 
-	listing, err := s.repo.GetNextApprovableListing(ctx, approvalRejectCooldown)
+	listing, err := s.repo.GetNextApprovableListing(ctx)
 	if err != nil {
 		return fmt.Errorf("next approvable: %w", err)
 	}
@@ -899,6 +957,11 @@ func (s *Scheduler) OnApprove(ctx context.Context, sentMessageID int64) error {
 	}
 
 	if err := s.contacter.Submit(ctx, listing, sm.Message, camp.Contact); err != nil {
+		// Log loudly: previously this error only lived in the DB and the
+		// optional Telegram notify — operators staring at container logs had
+		// no signal that an approval just blew up.
+		s.logger.Error("contact submit failed",
+			"is24_id", listing.IS24ID, "sent_message_id", sm.ID, "error", err)
 		s.repo.UpdateSentMessageStatus(ctx, sm.ID, domain.MessageStatusFailed, err.Error())
 		s.notifier.NotifyContactFailed(ctx, listing, err.Error())
 		s.repo.LogActivity(ctx, &domain.ActivityLog{
@@ -920,9 +983,9 @@ func (s *Scheduler) OnApprove(ctx context.Context, sentMessageID int64) error {
 	return nil
 }
 
-// OnReject marks the approval as rejected. The listing stays in the queue but
-// becomes eligible again only after approvalRejectCooldown — so the bot won't
-// immediately re-propose the same listing on the very next poll.
+// OnReject marks the approval as rejected. The listing is permanently removed
+// from the approval queue — once the user said no, the bot won't re-propose
+// the same exposé again.
 func (s *Scheduler) OnReject(ctx context.Context, sentMessageID int64) error {
 	sm, err := s.repo.GetSentMessage(ctx, sentMessageID)
 	if err != nil {

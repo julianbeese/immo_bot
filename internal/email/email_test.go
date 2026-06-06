@@ -115,12 +115,15 @@ func TestProcessLandlordReplyNotifiesAndLinks(t *testing.T) {
 		IsLandlordReply: true, IS24ID: "999", Summary: "Vermieter bietet Termin.",
 	}}, store, notif)
 
-	err := m.process(context.Background(), Message{
+	out, err := m.process(context.Background(), Message{
 		MessageID: "id-1", From: "hans@example.com", Subject: "Re: Anfrage",
 		Body: "Gerne Besichtigung", Date: time.Now(),
 	})
 	if err != nil {
 		t.Fatalf("process: %v", err)
+	}
+	if !out.Classified || !out.LandlordReply || !out.Notified {
+		t.Errorf("outcome unexpected: %+v", out)
 	}
 	if len(store.created) != 1 {
 		t.Fatalf("expected 1 created, got %d", len(store.created))
@@ -142,8 +145,12 @@ func TestProcessSystemMailNoNotify(t *testing.T) {
 	notif := &fakeNotifier{}
 	m := newTestMonitor(fakeClassifier{out: Classification{IsLandlordReply: false}}, store, notif)
 
-	if err := m.process(context.Background(), Message{MessageID: "id-2", Body: "Newsletter"}); err != nil {
+	out, err := m.process(context.Background(), Message{MessageID: "id-2", Body: "Newsletter"})
+	if err != nil {
 		t.Fatalf("process: %v", err)
+	}
+	if out.LandlordReply || out.Notified {
+		t.Errorf("system mail outcome should not flag landlord/notified: %+v", out)
 	}
 	if len(store.created) != 1 || store.created[0].Notified {
 		t.Errorf("system mail should be stored but not notified: %+v", store.created)
@@ -159,8 +166,12 @@ func TestProcessDedupSkipsClassifier(t *testing.T) {
 	cls := fakeClassifier{err: errors.New("must not be called")}
 	m := newTestMonitor(cls, store, &fakeNotifier{})
 
-	if err := m.process(context.Background(), Message{MessageID: "seen"}); err != nil {
+	out, err := m.process(context.Background(), Message{MessageID: "seen"})
+	if err != nil {
 		t.Fatalf("process dedup: %v", err)
+	}
+	if !out.Skipped {
+		t.Errorf("dedup should mark outcome.Skipped: %+v", out)
 	}
 	if len(store.created) != 0 {
 		t.Error("already-seen mail must not be re-created")

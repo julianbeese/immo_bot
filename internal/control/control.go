@@ -126,7 +126,7 @@ func New(store SettingsStore, logger *slog.Logger, def Defaults) *Controller {
 		quietHours:         def.QuietHoursEnabled,
 		quietStart:         def.QuietHoursStart,
 		quietEnd:           def.QuietHoursEnd,
-		pollInterval:       fallbackDuration(def.PollInterval, 5*time.Minute),
+		pollInterval:       fallbackDuration(def.PollInterval, 30*time.Minute),
 		contactTypeDelay:   fallbackDuration(def.ContactTypeDelay, 50*time.Millisecond),
 		contactActionDelay: fallbackDuration(def.ContactActionDelay, 1*time.Second),
 		excludeFurnished:   true,
@@ -413,7 +413,7 @@ func (c *Controller) statusMessage() string {
 	qs, qe := c.quietStart, c.quietEnd
 	c.mu.RUnlock()
 
-	mode := contactModeLabel(contactMode)
+	mode := contactMode.Label()
 
 	quietStatus := "☀️ Aus (24/7)"
 	if quietHours {
@@ -436,11 +436,13 @@ Befehle: /help für alle Optionen`, mode, quietStatus)
 
 // ContactModeLabel returns a human label for the current contact mode (markup).
 func (c *Controller) ContactModeLabel() string {
-	return contactModeLabel(c.GetContactMode())
+	return c.GetContactMode().Label()
 }
 
-func contactModeLabel(mode ContactMode) string {
-	switch mode {
+// Label returns the human-readable German label for a contact mode, suitable
+// for chat messages and dashboard display.
+func (m ContactMode) Label() string {
+	switch m {
 	case ContactModeOff:
 		return "⏸ Beobachtungsmodus"
 	case ContactModeTest:

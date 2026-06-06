@@ -81,22 +81,25 @@ func NewClient(cfg Config) *Client {
 // FetchSince connects, selects the mailbox read-only, and returns IS24-sender
 // mails with UID greater than afterUID (0 = all within the lookback window).
 // The returned highUID is the largest UID seen so the caller can persist it as
-// the next watermark. Sender filtering happens client-side so multiple sender
-// domains are supported without IMAP OR-criteria.
-func (c *Client) FetchSince(ctx context.Context, afterUID uint32) (msgs []Message, highUID uint32, err error) {
+// the next watermark. inspected is the number of mails in the lookback window
+// with UID > afterUID BEFORE the sender filter — exposed so callers can
+// distinguish "nothing new at all" from "lots of new mail but none from your
+// configured senders". Sender filtering happens client-side so multiple sender
+// substrings are supported without IMAP OR-criteria.
+func (c *Client) FetchSince(ctx context.Context, afterUID uint32) (msgs []Message, inspected int, highUID uint32, err error) {
 	cl, err := imapclient.DialTLS(c.addr, nil)
 	if err != nil {
-		return nil, 0, fmt.Errorf("imap dial %s: %w", c.addr, err)
+		return nil, 0, 0, fmt.Errorf("imap dial %s: %w", c.addr, err)
 	}
 	defer cl.Close()
 
 	if err := cl.Login(c.username, c.password).Wait(); err != nil {
-		return nil, 0, fmt.Errorf("imap login: %w", err)
+		return nil, 0, 0, fmt.Errorf("imap login: %w", err)
 	}
 	defer cl.Logout()
 
 	if _, err := cl.Select(c.mailbox, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
-		return nil, 0, fmt.Errorf("imap select %s: %w", c.mailbox, err)
+		return nil, 0, 0, fmt.Errorf("imap select %s: %w", c.mailbox, err)
 	}
 
 	// Coarse server-side filter: date only (IMAP SINCE ignores time). Fine
@@ -104,7 +107,7 @@ func (c *Client) FetchSince(ctx context.Context, afterUID uint32) (msgs []Messag
 	criteria := &imap.SearchCriteria{Since: time.Now().Add(-c.lookback)}
 	searchData, err := cl.UIDSearch(criteria, nil).Wait()
 	if err != nil {
-		return nil, 0, fmt.Errorf("imap search: %w", err)
+		return nil, 0, 0, fmt.Errorf("imap search: %w", err)
 	}
 
 	var uids []imap.UID
@@ -116,8 +119,9 @@ func (c *Client) FetchSince(ctx context.Context, afterUID uint32) (msgs []Messag
 			highUID = uint32(u)
 		}
 	}
-	if len(uids) == 0 {
-		return nil, afterUID, nil
+	inspected = len(uids)
+	if inspected == 0 {
+		return nil, 0, afterUID, nil
 	}
 
 	fetchOpts := &imap.FetchOptions{
@@ -127,7 +131,7 @@ func (c *Client) FetchSince(ctx context.Context, afterUID uint32) (msgs []Messag
 	}
 	buffers, err := cl.Fetch(imap.UIDSetNum(uids...), fetchOpts).Collect()
 	if err != nil {
-		return nil, 0, fmt.Errorf("imap fetch: %w", err)
+		return nil, inspected, 0, fmt.Errorf("imap fetch: %w", err)
 	}
 
 	for _, b := range buffers {
@@ -149,7 +153,16 @@ func (c *Client) FetchSince(ctx context.Context, afterUID uint32) (msgs []Messag
 			Body:      body,
 		})
 	}
-	return msgs, highUID, nil
+	return msgs, inspected, highUID, nil
+}
+
+// Senders returns the active sender substring filter. Surfaced so callers
+// (dashboard scan endpoint) can show users *which* filter was applied when
+// the inspected-but-no-match case fires.
+func (c *Client) Senders() []string {
+	out := make([]string, len(c.senders))
+	copy(out, c.senders)
+	return out
 }
 
 func (c *Client) matchesSender(from string) bool {

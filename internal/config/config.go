@@ -177,7 +177,7 @@ type MessageConfig struct {
 // DefaultConfig returns configuration with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
-		PollInterval: 5 * time.Minute,
+		PollInterval: 30 * time.Minute,
 		DatabasePath: "data/immobot.db",
 		LogLevel:     "info",
 		IS24: IS24Config{
@@ -385,11 +385,66 @@ func (c *Config) fillCampaign(camp Campaign) Campaign {
 	if camp.MessageTemplatePath == "" {
 		camp.MessageTemplatePath = c.Message.TemplatePath
 	}
-	// A campaign that omits contact_profile (no name given) uses the global one.
-	if camp.Contact.FirstName == "" && camp.Contact.Email == "" {
-		camp.Contact = c.Contact.Profile
-	}
+	// Field-by-field merge so a campaign can override JUST the fields it cares
+	// about (e.g. wg sets adults=2) instead of having to duplicate the full
+	// applicant profile. Zero values on the campaign side fall back to the
+	// global. Booleans deliberately fall through unchanged — there's no
+	// "unset" sentinel for a bool, so if you need a campaign that flips a
+	// bool, set it explicitly in the campaign block.
+	camp.Contact = mergeContactProfile(c.Contact.Profile, camp.Contact)
 	return camp
+}
+
+// mergeContactProfile overlays `override` onto `base`, returning `base`'s
+// value for any field that is at its zero value on the override side. Each
+// string compared to "", each int compared to 0. Bool fields are NOT merged
+// for the reason above — they pass through from override verbatim.
+func mergeContactProfile(base, override ContactProfile) ContactProfile {
+	merged := base
+
+	if override.Salutation != "" {
+		merged.Salutation = override.Salutation
+	}
+	if override.FirstName != "" {
+		merged.FirstName = override.FirstName
+	}
+	if override.LastName != "" {
+		merged.LastName = override.LastName
+	}
+	if override.Email != "" {
+		merged.Email = override.Email
+	}
+	if override.Phone != "" {
+		merged.Phone = override.Phone
+	}
+	if override.Street != "" {
+		merged.Street = override.Street
+	}
+	if override.HouseNumber != "" {
+		merged.HouseNumber = override.HouseNumber
+	}
+	if override.PostalCode != "" {
+		merged.PostalCode = override.PostalCode
+	}
+	if override.City != "" {
+		merged.City = override.City
+	}
+	if override.MoveInDate != "" {
+		merged.MoveInDate = override.MoveInDate
+	}
+	if override.Employment != "" {
+		merged.Employment = override.Employment
+	}
+	if override.Adults != 0 {
+		merged.Adults = override.Adults
+	}
+	if override.Children != 0 {
+		merged.Children = override.Children
+	}
+	if override.Income != 0 {
+		merged.Income = override.Income
+	}
+	return merged
 }
 
 func applyEnvBool(name string, target *bool) error {

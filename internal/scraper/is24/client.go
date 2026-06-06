@@ -56,8 +56,12 @@ func NewClient(cookie string, rateLimiter *antidetect.RateLimiter, uaRotator *an
 	}, nil
 }
 
-// Search performs a search and returns found listings
-func (c *Client) Search(ctx context.Context, profile *domain.SearchProfile) ([]domain.Listing, error) {
+// Search performs a search and returns found listings. existsFn, when non-nil,
+// truncates the result at the first already-known IS24 ID (results are sorted
+// newest-first via the sorting=2 URL param), mirroring the BrowserClient's
+// early-stop semantics so the IS24Client contract is consistent across both
+// implementations.
+func (c *Client) Search(ctx context.Context, profile *domain.SearchProfile, existsFn func(is24ID string) bool) ([]domain.Listing, error) {
 	// Build search URL
 	searchURL := c.buildSearchURL(profile)
 
@@ -76,12 +80,16 @@ func (c *Client) Search(ctx context.Context, profile *domain.SearchProfile) ([]d
 		return nil, fmt.Errorf("parse search: %w", err)
 	}
 
-	// Set search profile ID for all listings
+	out := make([]domain.Listing, 0, len(listings))
 	for i := range listings {
+		if existsFn != nil && existsFn(listings[i].IS24ID) {
+			break
+		}
 		listings[i].SearchProfileID = profile.ID
+		out = append(out, listings[i])
 	}
 
-	return listings, nil
+	return out, nil
 }
 
 // FetchExpose fetches detailed information for a single listing
@@ -99,16 +107,12 @@ func (c *Client) FetchExpose(ctx context.Context, is24ID string) (*domain.Listin
 }
 
 func (c *Client) buildSearchURL(profile *domain.SearchProfile) string {
-	// Use custom search URL if provided
+	// Use custom search URL if provided. forceSortByNewest rewrites any
+	// existing sorting= value to sorting=2 — the early-stop semantics rely on
+	// newest-first order and a user-set sort (e.g. price) would silently break
+	// it.
 	if profile.SearchURL != "" {
-		// Ensure custom URL also sorts by newest first
-		if !strings.Contains(profile.SearchURL, "sorting=") {
-			if strings.Contains(profile.SearchURL, "?") {
-				return profile.SearchURL + "&sorting=2"
-			}
-			return profile.SearchURL + "?sorting=2"
-		}
-		return profile.SearchURL
+		return forceSortByNewest(profile.SearchURL)
 	}
 
 	// Build URL from profile criteria

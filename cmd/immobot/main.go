@@ -31,6 +31,7 @@ import (
 	"github.com/julianbeese/immo_bot/internal/repository/sqlite"
 	"github.com/julianbeese/immo_bot/internal/scheduler"
 	"github.com/julianbeese/immo_bot/internal/scraper/is24"
+	"github.com/julianbeese/immo_bot/internal/secrets"
 	"github.com/julianbeese/immo_bot/internal/web"
 )
 
@@ -43,6 +44,8 @@ func main() {
 	configPath := flag.String("config", "configs/config.yaml", "Path to configuration file")
 	runOnce := flag.Bool("once", false, "Run a single poll cycle and exit")
 	healthcheck := flag.Bool("healthcheck", false, "Check poll heartbeat freshness and exit (0=healthy)")
+	backfill := flag.Bool("backfill", false, "One-time seed: scrape paginated search results for every active profile, record every IS24 ID as already-known (notified=1, contacted=1, backfilled=1) so the next poll only notifies on genuinely new listings. Existing listings are never overwritten. Exits after seeding.")
+	backfillPages := flag.Int("backfill-pages", 30, "Maximum result pages per profile during -backfill (each page ≈ 20 listings)")
 	flag.Parse()
 
 	// Setup logging
@@ -97,6 +100,26 @@ func main() {
 
 	logger.Info("database initialized", "path", cfg.DatabasePath)
 
+	// Drop any meta rows that historically held plaintext credentials. Idempotent
+	// — a no-op after the first run on each upgraded database.
+	if err := repo.PurgeLegacySecrets(context.Background()); err != nil {
+		logger.Warn("failed to purge legacy secret meta rows", "error", err)
+	}
+
+	// Load the AES-GCM key used to wrap the IS24 cookie in the meta table. The
+	// key comes from SECRETS_KEY when set, otherwise a 0600 file alongside the
+	// database — see internal/secrets for details.
+	cookieKey, err := secrets.LoadOrGenerateKey(dataDir, logger)
+	if err != nil {
+		logger.Error("failed to load secrets key", "error", err)
+		os.Exit(1)
+	}
+	cookieEnc, err := secrets.NewEncrypter(cookieKey)
+	if err != nil {
+		logger.Error("failed to initialize cookie encrypter", "error", err)
+		os.Exit(1)
+	}
+
 	// Initialize anti-detection components
 	rateLimiter := antidetect.NewRateLimiter(
 		cfg.IS24.MaxRequestsPerMinute,
@@ -109,11 +132,35 @@ func main() {
 
 	// A previously hot-reloaded IS24 cookie (saved in the meta table via the
 	// dashboard / Telegram /cookie command) overrides the env-supplied one so
-	// the override survives container restarts without editing .env.
+	// the override survives container restarts without editing .env. The
+	// stored value is AES-GCM encrypted; legacy plaintext rows are migrated
+	// to the encrypted form on first read so they don't sit in the DB.
 	if v, _ := repo.GetMeta(context.Background(), sqlite.MetaIS24Cookie); v != "" {
-		cfg.IS24.Cookie = v
-		logger.Info("IS24 cookie loaded from meta override")
+		if secrets.IsEncrypted(v) {
+			pt, err := cookieEnc.Decrypt(v)
+			if err != nil {
+				logger.Error("failed to decrypt IS24 cookie from meta (wrong SECRETS_KEY?)", "error", err)
+				os.Exit(1)
+			}
+			cfg.IS24.Cookie = pt
+			logger.Info("IS24 cookie loaded from meta override (encrypted)")
+		} else {
+			cfg.IS24.Cookie = v
+			if ct, err := cookieEnc.Encrypt(v); err == nil {
+				if err := repo.SetMeta(context.Background(), sqlite.MetaIS24Cookie, ct); err != nil {
+					logger.Warn("failed to migrate IS24 cookie to encrypted form", "error", err)
+				} else {
+					logger.Info("IS24 cookie migrated from plaintext to encrypted at-rest form")
+				}
+			}
+		}
 	}
+
+	// Email config overrides from the meta table (set via the dashboard).
+	// Mirrors the IS24 cookie pattern so users can configure IMAP without
+	// editing .env. Empty meta values fall through to the config.yaml/env layer.
+	applyEmailMetaOverrides(repo, cfg, logger)
+	applyEmailPasswordFromMeta(repo, cfg, cookieEnc, logger)
 
 	// Initialize IS24 browser client (uses chromedp to bypass WAF)
 	proxy := antidetect.Proxy{
@@ -131,6 +178,13 @@ func main() {
 		logger.Info("IS24 browser client initialized", "proxy", proxy.URL, "auth", proxy.RequiresAuth(), "cap_mb", cfg.IS24.Proxy.BandwidthCapMB)
 	} else {
 		logger.Info("IS24 browser client initialized")
+	}
+
+	// One-time backfill: seed the DB with every IS24 ID currently visible across
+	// each profile's search results, then exit. Runs before any notifier /
+	// scheduler is wired so a backfill run can never message Telegram/WhatsApp.
+	if *backfill {
+		os.Exit(runBackfill(context.Background(), repo, is24Client, *backfillPages, logger))
 	}
 
 	// Initialize filter engine
@@ -226,20 +280,32 @@ func main() {
 	)
 
 	// Wire the IMAP inbox monitor (IS24 provider replies). Requires OpenAI for
-	// classification (enforced in config.Validate).
+	// classification. cfg.Validate covers the env path; meta overrides can also
+	// enable email after startup, so we re-check the dependencies here.
+	// emailMonitor stays nil if the monitor cannot be constructed; that's a
+	// signal the web layer uses to disable the "Jetzt scannen"-button.
+	var emailMonitor *email.Monitor
 	if cfg.Email.Enabled {
-		emailClient := email.NewClient(email.Config{
-			Addr:     cfg.Email.IMAPHost,
-			Username: cfg.Email.Username,
-			Password: cfg.Email.Password,
-			Mailbox:  cfg.Email.Mailbox,
-			Senders:  cfg.Email.Senders,
-			Lookback: cfg.Email.Lookback,
-		})
-		classifier := messenger.NewOpenAIEmailClassifier(cfg.OpenAI.APIKey, cfg.OpenAI.Model)
-		sched.SetEmailMonitor(email.NewMonitor(emailClient, classifier, repo, notif, logger))
-		logger.Info("email inbox monitor enabled", "mailbox", cfg.Email.Mailbox, "host", cfg.Email.IMAPHost)
+		if missing := missingEmailFields(cfg); missing != "" {
+			logger.Warn("email enabled but configuration incomplete — monitor not started", "missing", missing)
+		} else {
+			emailClient := email.NewClient(email.Config{
+				Addr:     cfg.Email.IMAPHost,
+				Username: cfg.Email.Username,
+				Password: cfg.Email.Password,
+				Mailbox:  cfg.Email.Mailbox,
+				Senders:  cfg.Email.Senders,
+				Lookback: cfg.Email.Lookback,
+			})
+			classifier := messenger.NewOpenAIEmailClassifier(cfg.OpenAI.APIKey, cfg.OpenAI.Model)
+			emailMonitor = email.NewMonitor(emailClient, classifier, repo, notif, logger)
+			sched.SetEmailMonitor(emailMonitor)
+			logger.Info("email inbox monitor enabled", "mailbox", cfg.Email.Mailbox, "host", cfg.Email.IMAPHost)
+		}
 	}
+
+	// Cookie encrypter so the meta-table row is wrapped in AES-GCM.
+	sched.SetCookieEncrypter(cookieEnc)
 
 	// Connect shared controller state to scheduler
 	sched.SetAutoContactCallback(ctrl.IsAutoContactEnabled)
@@ -371,7 +437,13 @@ func main() {
 
 	// Start web dashboard (localhost by default)
 	if cfg.Web.Enabled {
-		websrv := web.New(repo, ctrl, cfg, sched.GetStats, sched.SetIS24Cookie, logger)
+		websrv := web.New(repo, ctrl, cfg, sched.GetStats, sched.SetIS24Cookie, tgNotifier, sched, logger)
+		websrv.SetCookieEncrypter(cookieEnc)
+		// Wire the on-demand inbox scan trigger. nil when email is disabled —
+		// /api/inbox/scan then reports 503.
+		if emailMonitor != nil {
+			websrv.SetInboxScanner(emailMonitor)
+		}
 		go func() {
 			if err := websrv.Start(ctx, cfg.Web.Addr); err != nil {
 				logger.Error("web dashboard failed", "error", err)
@@ -560,6 +632,121 @@ func campaignNames(cfg *config.Config) []string {
 	return names
 }
 
+// applyEmailPasswordFromMeta loads the IMAP app password from the meta table,
+// mirroring the IS24 cookie pattern: encrypted rows are decrypted, legacy
+// plaintext rows are migrated, and a password supplied only via EMAIL_PASSWORD
+// env is bootstrapped into encrypted at-rest form on first run.
+func applyEmailPasswordFromMeta(repo *sqlite.Repository, cfg *config.Config, enc *secrets.Encrypter, logger *slog.Logger) {
+	ctx := context.Background()
+	v, _ := repo.GetMeta(ctx, sqlite.MetaEmailPassword)
+	switch {
+	case v != "":
+		if secrets.IsEncrypted(v) {
+			pt, err := enc.Decrypt(v)
+			if err != nil {
+				logger.Error("failed to decrypt email password from meta (wrong SECRETS_KEY?)", "error", err)
+				os.Exit(1)
+			}
+			cfg.Email.Password = pt
+			logger.Info("email password loaded from meta (encrypted)")
+		} else {
+			cfg.Email.Password = v
+			if ct, err := enc.Encrypt(v); err == nil {
+				if err := repo.SetMeta(ctx, sqlite.MetaEmailPassword, ct); err != nil {
+					logger.Warn("failed to migrate email password to encrypted form", "error", err)
+				} else {
+					logger.Info("email password migrated from plaintext to encrypted at-rest form")
+				}
+			}
+		}
+	case strings.TrimSpace(cfg.Email.Password) != "":
+		if ct, err := enc.Encrypt(cfg.Email.Password); err == nil {
+			if err := repo.SetMeta(ctx, sqlite.MetaEmailPassword, ct); err != nil {
+				logger.Warn("failed to bootstrap email password from env to encrypted form", "error", err)
+			} else {
+				logger.Info("email password bootstrapped from env to encrypted at-rest form")
+			}
+		}
+	}
+}
+
+// applyEmailMetaOverrides merges dashboard-edited email settings (persisted in
+// the meta table) into cfg.Email. Only non-empty meta values overwrite the
+// existing config, so the merge is additive: env/yaml still wins for fields the
+// user hasn't customized via the dashboard.
+func applyEmailMetaOverrides(repo *sqlite.Repository, cfg *config.Config, logger *slog.Logger) {
+	ctx := context.Background()
+	read := func(key string) string {
+		v, _ := repo.GetMeta(ctx, key)
+		return v
+	}
+
+	if v := read(sqlite.MetaEmailEnabled); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			cfg.Email.Enabled = true
+		case "0", "false", "no", "off":
+			cfg.Email.Enabled = false
+		}
+	}
+	if v := read(sqlite.MetaEmailIMAPHost); v != "" {
+		cfg.Email.IMAPHost = v
+	}
+	if v := read(sqlite.MetaEmailUsername); v != "" {
+		cfg.Email.Username = v
+	}
+	if v := read(sqlite.MetaEmailMailbox); v != "" {
+		cfg.Email.Mailbox = v
+	}
+	if v := read(sqlite.MetaEmailLookbackHours); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			cfg.Email.Lookback = time.Duration(n) * time.Hour
+		}
+	}
+	if v := read(sqlite.MetaEmailSenders); v != "" {
+		var out []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		if len(out) > 0 {
+			cfg.Email.Senders = out
+		}
+	}
+
+	// Log only when at least one meta override is present, to keep the start-up
+	// log quiet for users on the env-only path.
+	if read(sqlite.MetaEmailEnabled)+read(sqlite.MetaEmailIMAPHost)+read(sqlite.MetaEmailUsername) != "" {
+		logger.Info("email config loaded from meta override",
+			"enabled", cfg.Email.Enabled,
+			"host", cfg.Email.IMAPHost,
+			"user", cfg.Email.Username,
+			"mailbox", cfg.Email.Mailbox,
+		)
+	}
+}
+
+// missingEmailFields returns a comma-separated list of email config fields that
+// are required for the monitor but currently unset. Returns "" when the config
+// is complete enough to start.
+func missingEmailFields(cfg *config.Config) string {
+	var missing []string
+	if strings.TrimSpace(cfg.Email.IMAPHost) == "" {
+		missing = append(missing, "imap_host")
+	}
+	if strings.TrimSpace(cfg.Email.Username) == "" {
+		missing = append(missing, "username")
+	}
+	if strings.TrimSpace(cfg.Email.Password) == "" {
+		missing = append(missing, "password")
+	}
+	if !cfg.OpenAI.Enabled || strings.TrimSpace(cfg.OpenAI.APIKey) == "" {
+		missing = append(missing, "openai (required for classification)")
+	}
+	return strings.Join(missing, ", ")
+}
+
 // runHealthCheck reports whether the last successful poll is recent enough.
 // Returns 0 (healthy) or 1 (stale/unknown) for use as a container HEALTHCHECK.
 func runHealthCheck(cfg *config.Config) int {
@@ -590,5 +777,85 @@ func runHealthCheck(cfg *config.Config) int {
 		fmt.Fprintf(os.Stderr, "healthcheck: last poll %s ago (> %s)\n", age.Round(time.Second), maxAge)
 		return 1
 	}
+	return 0
+}
+
+// is24SearchPaginator is the deeper-paginated search method offered by the
+// BrowserClient; declared as an interface here so runBackfill stays decoupled
+// from the concrete client type (and is trivially mockable in tests).
+type is24SearchPaginator interface {
+	SearchPaginated(ctx context.Context, profile *domain.SearchProfile, maxPages int) ([]domain.Listing, error)
+}
+
+// runBackfill seeds the DB with every IS24 ID currently visible across each
+// active profile's search results so the regular poll cycle won't treat them
+// as new. Existing listings are never overwritten (INSERT OR IGNORE); only
+// previously-unknown IDs get a minimal stub row with notified=1, contacted=1,
+// backfilled=1, which keeps them out of every downstream queue.
+//
+// Expose pages are NOT fetched — search-result fields are enough to record
+// "we've seen this ID". This is the whole point of the backfill: cheap to run,
+// safe to repeat, and never sends a notification.
+func runBackfill(ctx context.Context, repo *sqlite.Repository, client is24SearchPaginator, maxPages int, logger *slog.Logger) int {
+	profiles, err := repo.GetActiveSearchProfiles(ctx)
+	if err != nil {
+		logger.Error("backfill: load profiles failed", "error", err)
+		return 1
+	}
+	if len(profiles) == 0 {
+		logger.Warn("backfill: no active search profiles — nothing to do")
+		return 0
+	}
+
+	logger.Info("backfill starting", "profiles", len(profiles), "max_pages_per_profile", maxPages)
+
+	var totalSeen, totalInserted, totalSkipped int
+	for i := range profiles {
+		profile := &profiles[i]
+		logger.Info("backfill: scraping profile",
+			"id", profile.ID, "name", profile.Name, "url", profile.SearchURL)
+
+		listings, err := client.SearchPaginated(ctx, profile, maxPages)
+		if err != nil {
+			// Don't abort the whole backfill on a single profile failure — the
+			// other profiles can still be seeded, and the user can re-run later.
+			logger.Error("backfill: profile scrape failed, continuing",
+				"profile", profile.Name, "error", err)
+			continue
+		}
+
+		var inserted, skipped int
+		for j := range listings {
+			l := listings[j]
+			l.SearchProfileID = profile.ID
+			ok, err := repo.BackfillSeedListing(ctx, &l)
+			if err != nil {
+				logger.Error("backfill: insert failed",
+					"is24_id", l.IS24ID, "error", err)
+				continue
+			}
+			if ok {
+				inserted++
+			} else {
+				skipped++ // already in DB — preserved as-is
+			}
+		}
+
+		logger.Info("backfill: profile complete",
+			"profile", profile.Name,
+			"scraped", len(listings),
+			"newly_seeded", inserted,
+			"already_known", skipped)
+
+		totalSeen += len(listings)
+		totalInserted += inserted
+		totalSkipped += skipped
+	}
+
+	logger.Info("backfill complete",
+		"profiles", len(profiles),
+		"total_scraped", totalSeen,
+		"newly_seeded", totalInserted,
+		"already_known_preserved", totalSkipped)
 	return 0
 }

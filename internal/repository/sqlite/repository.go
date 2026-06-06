@@ -27,6 +27,28 @@ const MetaLastPollOK = "last_poll_ok"
 // happen via the dashboard or the /cookie chat command.
 const MetaIS24Cookie = "is24.cookie"
 
+// Meta keys for the IMAP inbox monitor. Values written here override the
+// config.yaml/env-derived EmailConfig at startup and survive container
+// restarts. Edited via the web dashboard; changes take effect after restart.
+const (
+	MetaEmailEnabled       = "email.enabled"        // "1"/"0"
+	MetaEmailIMAPHost      = "email.imap_host"      // host:port (implicit TLS)
+	MetaEmailUsername      = "email.username"       // IMAP user
+	MetaEmailMailbox       = "email.mailbox"        // e.g. "INBOX"
+	MetaEmailLookbackHours = "email.lookback_hours" // integer hours, e.g. "72"
+	MetaEmailSenders       = "email.senders"        // comma-separated From filters
+	// MetaEmailPassword holds the IMAP app password, AES-GCM encrypted with the
+	// same key as the IS24 cookie (see internal/secrets). Legacy plaintext rows
+	// are migrated to this form on startup.
+	MetaEmailPassword = "email.password"
+)
+
+// PurgeLegacySecrets removes obsolete meta rows from pre-encryption upgrades.
+// Safe to call on every startup — no-op once the rows are gone.
+func (r *Repository) PurgeLegacySecrets(ctx context.Context) error {
+	return nil
+}
+
 // CampaignPromptKey / CampaignTemplateKey are the meta-table keys under which
 // dashboard-edited per-campaign overrides (AI system prompt, message template)
 // are persisted. Shared by the scheduler (reads at send time) and the web
@@ -395,6 +417,50 @@ func (r *Repository) CreateListing(ctx context.Context, l *domain.Listing) error
 	return nil
 }
 
+// BackfillSeedListing inserts a minimal listing row that records the IS24 ID
+// as already-known. It is used by the one-time `-backfill` command to seed the
+// DB with all currently-listed expose IDs from each profile's search results,
+// so the next regular poll cycle won't treat them as new and notify on them.
+//
+// Returns true if a row was inserted, false if a listing with the same IS24 ID
+// already existed (INSERT OR IGNORE — existing rows are never overwritten).
+//
+// The row is flagged notified=1 AND contacted=1 AND backfilled=1 so it is
+// invisible to every downstream queue (notifications, auto-contact, approval,
+// test previews), and the dashboard can later distinguish backfill stubs from
+// fully-scraped listings via the backfilled column.
+func (r *Repository) BackfillSeedListing(ctx context.Context, l *domain.Listing) (bool, error) {
+	imageURLs, _ := json.Marshal(l.ImageURLs)
+
+	result, err := r.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO listings (
+			is24_id, title, url, address, city, district, postal_code,
+			price, price_per_sqm, rooms, area, has_balcony, has_ebk,
+			has_elevator, pets_allowed, build_year, available_from,
+			description, landlord_name, landlord_type, image_urls,
+			contact_form_url, search_profile_id, contact_person,
+			contact_salutation, exclusive_expose,
+			notified, contacted, backfilled
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1)
+	`,
+		l.IS24ID, l.Title, l.URL, l.Address, l.City, l.District, l.PostalCode,
+		l.Price, l.PricePerSqm, l.Rooms, l.Area, l.HasBalcony, l.HasEBK,
+		l.HasElevator, nullableBool(l.PetsAllowed), nullableInt(l.BuildYear),
+		l.AvailableFrom, l.Description, l.LandlordName, l.LandlordType,
+		string(imageURLs), l.ContactFormURL, l.SearchProfileID,
+		nullableString(l.ContactPerson), nullableString(l.ContactSalutation),
+		l.ExclusiveExpose,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetListingByIS24ID retrieves a listing by its IS24 ID
 func (r *Repository) GetListingByIS24ID(ctx context.Context, is24ID string) (*domain.Listing, error) {
 	var l domain.Listing
@@ -525,9 +591,111 @@ func (r *Repository) GetUnnotifiedListings(ctx context.Context) ([]domain.Listin
 	return r.getListingsByCondition(ctx, "notified = 0", "")
 }
 
-// GetUncontactedListings returns listings that haven't been contacted
+// GetUncontactedListings returns listings that haven't been contacted. Manually
+// skipped listings are excluded so the user's "ignore" action takes effect.
 func (r *Repository) GetUncontactedListings(ctx context.Context) ([]domain.Listing, error) {
-	return r.getListingsByCondition(ctx, "contacted = 0 AND notified = 1", "")
+	return r.getListingsByCondition(ctx, "contacted = 0 AND notified = 1 AND skipped = 0", "")
+}
+
+// SetListingSkipped flips a listing's manual ignore flag. Skipped listings are
+// hidden from auto-contact / preview pickups but stay visible in the dashboard.
+// When skipping, any open pending_approval row for the listing is also rejected
+// so it stops blocking the strict-sequential approval queue.
+func (r *Repository) SetListingSkipped(ctx context.Context, id int64, skipped bool) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE listings SET skipped = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		skipped, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("no listing with id %d", id)
+	}
+	if skipped {
+		if _, err := r.rejectPendingApprovalsForListings(ctx, []int64{id}); err != nil {
+			return fmt.Errorf("reject pending approvals: %w", err)
+		}
+	}
+	return nil
+}
+
+// SetListingsSkipped applies the skip flag to many listings in one statement.
+// Missing IDs are silently ignored (returns RowsAffected only) so the caller
+// can flag a UI selection without first re-verifying which rows still exist.
+func (r *Repository) SetListingsSkipped(ctx context.Context, ids []int64, skipped bool) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, skipped)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	res, err := r.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE listings SET skipped = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN (%s)`,
+		strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return 0, err
+	}
+	if skipped {
+		if _, err := r.rejectPendingApprovalsForListings(ctx, ids); err != nil {
+			return 0, fmt.Errorf("reject pending approvals: %w", err)
+		}
+	}
+	return res.RowsAffected()
+}
+
+// ClearListingRejection deletes every rejected sent_message for the given
+// listing so it becomes eligible for the approval queue again. Used by the
+// dashboard's "Verwerfung rückgängig" action when the user wants to undo an
+// accidental ❌. Returns the number of removed rows.
+func (r *Repository) ClearListingRejection(ctx context.Context, listingID int64) (int64, error) {
+	res, err := r.db.ExecContext(ctx,
+		`DELETE FROM sent_messages WHERE listing_id = ? AND status = ?`,
+		listingID, domain.MessageStatusRejected)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// rejectPendingApprovalsForListings flips any open pending_approval row for the
+// given listing IDs to rejected, so the strict-sequential approval queue isn't
+// blocked by a card the user already dismissed via the dashboard. Returns the
+// number of rows updated.
+func (r *Repository) rejectPendingApprovalsForListings(ctx context.Context, ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+3)
+	args = append(args,
+		domain.MessageStatusRejected,
+		"auto-rejected: listing skipped in dashboard",
+		domain.MessageStatusPendingApproval,
+	)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	res, err := r.db.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE sent_messages
+		SET status = ?,
+		    error_msg = ?,
+		    sent_at = CURRENT_TIMESTAMP
+		WHERE status = ?
+		  AND listing_id IN (%s)
+	`, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ListRecentListings returns the most recent listings (for the dashboard).
@@ -539,11 +707,12 @@ func (r *Repository) ListRecentListings(ctx context.Context, limit int) ([]domai
 }
 
 // GetPreviewableListings returns uncontacted listings that have not already
-// received a test-mode preview.
+// received a test-mode preview. Manually skipped listings are excluded.
 func (r *Repository) GetPreviewableListings(ctx context.Context) ([]domain.Listing, error) {
 	return r.getListingsByCondition(ctx, `
 		contacted = 0
 		AND notified = 1
+		AND skipped = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM sent_messages
 			WHERE sent_messages.listing_id = listings.id
@@ -564,11 +733,15 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 			listings.pets_allowed, listings.build_year, listings.available_from,
 			listings.description, listings.landlord_name, listings.landlord_type,
 			listings.image_urls, listings.contact_form_url, listings.search_profile_id,
-			listings.contacted, listings.notified,
+			listings.contacted, listings.notified, listings.skipped,
 			listings.contact_person, listings.contact_salutation,
 			listings.exclusive_expose,
 			listings.created_at, listings.updated_at,
-			search_profiles.name
+			search_profiles.name,
+			EXISTS (
+				SELECT 1 FROM sent_messages sm
+				WHERE sm.listing_id = listings.id AND sm.status = 'rejected'
+			) AS rejected
 		FROM listings
 		LEFT JOIN search_profiles ON search_profiles.id = listings.search_profile_id
 		WHERE %s ORDER BY listings.created_at DESC %s
@@ -595,10 +768,11 @@ func (r *Repository) getListingsByCondition(ctx context.Context, condition, suff
 			&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &buildYear,
 			&availableFrom, &description, &landlordName, &landlordType,
 			&imageURLs, &contactFormURL, &l.SearchProfileID, &l.Contacted,
-			&l.Notified, &contactPerson, &contactSalutation,
+			&l.Notified, &l.Skipped, &contactPerson, &contactSalutation,
 			&l.ExclusiveExpose,
 			&l.CreatedAt, &l.UpdatedAt,
 			&searchProfileName,
+			&l.Rejected,
 		)
 		if err != nil {
 			return nil, err
@@ -742,6 +916,38 @@ func (r *Repository) GetSentMessagesByListing(ctx context.Context, listingID int
 	return out, rows.Err()
 }
 
+// ExpireStalePendingApprovals flips every pending_approval row whose created_at
+// is older than maxAge to status='rejected' with sent_at=NOW. This unblocks the
+// strict-sequential approval queue when the user never pressed ✅/❌ on a card
+// (Telegram message lost, bot restarted, callback dropped, …). Auto-rejected
+// rows behave like manual rejections — the listing is permanently removed from
+// the approval queue.
+//
+// Returns the number of expired rows.
+func (r *Repository) ExpireStalePendingApprovals(ctx context.Context, maxAge time.Duration) (int64, error) {
+	seconds := int64(maxAge.Seconds())
+	if seconds <= 0 {
+		return 0, nil
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE sent_messages
+		SET status = ?,
+		    error_msg = ?,
+		    sent_at = CURRENT_TIMESTAMP
+		WHERE status = ?
+		  AND created_at < datetime('now', ?)
+	`,
+		domain.MessageStatusRejected,
+		fmt.Sprintf("auto-expired after %s without ✅/❌", maxAge),
+		domain.MessageStatusPendingApproval,
+		fmt.Sprintf("-%d seconds", seconds),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // CountPendingApprovals returns how many sent_messages are still awaiting the
 // user's ✅/❌ decision. Used by the scheduler to enforce strict-sequential
 // approval (skip new suggestions while one is in flight).
@@ -757,31 +963,25 @@ func (r *Repository) CountPendingApprovals(ctx context.Context) (int, error) {
 // for approval. Eligibility:
 //   - notified, not yet contacted
 //   - no sent_message currently pending_approval, sent, or pending (in flight)
-//   - if a previous proposal was rejected, the listing becomes eligible again
-//     after a cooldown (default 6h since the most recent rejection)
+//   - no prior rejection (rejected listings are permanently excluded — the
+//     user already said no, don't re-propose)
 //
 // Returns nil, nil when the queue is empty.
-func (r *Repository) GetNextApprovableListing(ctx context.Context, rejectCooldown time.Duration) (*domain.Listing, error) {
+func (r *Repository) GetNextApprovableListing(ctx context.Context) (*domain.Listing, error) {
 	listings, err := r.getListingsByCondition(ctx, fmt.Sprintf(`
 		contacted = 0
 		AND notified = 1
+		AND skipped = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM sent_messages sm
 			WHERE sm.listing_id = listings.id
-			AND sm.status IN ('%s', '%s', '%s')
-		)
-		AND NOT EXISTS (
-			SELECT 1 FROM sent_messages sm
-			WHERE sm.listing_id = listings.id
-			AND sm.status = '%s'
-			AND sm.sent_at > datetime('now', '-%d seconds')
+			AND sm.status IN ('%s', '%s', '%s', '%s')
 		)
 	`,
 		domain.MessageStatusPendingApproval,
 		domain.MessageStatusSent,
 		domain.MessageStatusPending,
 		domain.MessageStatusRejected,
-		int(rejectCooldown.Seconds()),
 	), "LIMIT 1")
 	if err != nil {
 		return nil, err
@@ -790,6 +990,52 @@ func (r *Repository) GetNextApprovableListing(ctx context.Context, rejectCooldow
 		return nil, nil
 	}
 	return &listings[0], nil
+}
+
+// GetApprovalQueue returns the listings the scheduler would propose next, in
+// the same order GetNextApprovableListing would pick them — minus the LIMIT 1.
+// Powers the dashboard queue view. limit <= 0 falls back to 50.
+func (r *Repository) GetApprovalQueue(ctx context.Context, limit int) ([]domain.Listing, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return r.getListingsByCondition(ctx, fmt.Sprintf(`
+		contacted = 0
+		AND notified = 1
+		AND skipped = 0
+		AND NOT EXISTS (
+			SELECT 1 FROM sent_messages sm
+			WHERE sm.listing_id = listings.id
+			AND sm.status IN ('%s', '%s', '%s', '%s')
+		)
+	`,
+		domain.MessageStatusPendingApproval,
+		domain.MessageStatusSent,
+		domain.MessageStatusPending,
+		domain.MessageStatusRejected,
+	), fmt.Sprintf("LIMIT %d", limit))
+}
+
+// GetPendingApprovalMessage returns the single in-flight pending_approval
+// sent_message (the one currently shown in Telegram), or nil if none.
+// Strict-sequential design guarantees at most one row.
+func (r *Repository) GetPendingApprovalMessage(ctx context.Context) (*domain.SentMessage, error) {
+	var sm domain.SentMessage
+	var errMsg sql.NullString
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, listing_id, is24_id, message, status, error_msg, sent_at, created_at
+		FROM sent_messages WHERE status = ?
+		ORDER BY created_at DESC LIMIT 1
+	`, domain.MessageStatusPendingApproval).Scan(&sm.ID, &sm.ListingID, &sm.IS24ID,
+		&sm.Message, &sm.Status, &errMsg, &sm.SentAt, &sm.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	sm.ErrorMsg = errMsg.String
+	return &sm, nil
 }
 
 // GetListingByID returns a listing by its primary key. Used by the approval
@@ -812,11 +1058,15 @@ func (r *Repository) GetListingByID(ctx context.Context, id int64) (*domain.List
 			listings.pets_allowed, listings.build_year, listings.available_from,
 			listings.description, listings.landlord_name, listings.landlord_type,
 			listings.image_urls, listings.contact_form_url, listings.search_profile_id,
-			listings.contacted, listings.notified,
+			listings.contacted, listings.notified, listings.skipped,
 			listings.contact_person, listings.contact_salutation,
 			listings.exclusive_expose,
 			listings.created_at, listings.updated_at,
-			search_profiles.name
+			search_profiles.name,
+			EXISTS (
+				SELECT 1 FROM sent_messages sm
+				WHERE sm.listing_id = listings.id AND sm.status = 'rejected'
+			) AS rejected
 		FROM listings
 		LEFT JOIN search_profiles ON search_profiles.id = listings.search_profile_id
 		WHERE listings.id = ?
@@ -826,10 +1076,11 @@ func (r *Repository) GetListingByID(ctx context.Context, id int64) (*domain.List
 		&l.HasBalcony, &l.HasEBK, &l.HasElevator, &petsAllowed, &buildYear,
 		&availableFrom, &description, &landlordName, &landlordType,
 		&imageURLs, &contactFormURL, &l.SearchProfileID, &l.Contacted,
-		&l.Notified, &contactPerson, &contactSalutation,
+		&l.Notified, &l.Skipped, &contactPerson, &contactSalutation,
 		&l.ExclusiveExpose,
 		&l.CreatedAt, &l.UpdatedAt,
 		&searchProfileName,
+		&l.Rejected,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

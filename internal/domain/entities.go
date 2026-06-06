@@ -71,6 +71,20 @@ type Listing struct {
 	SearchProfileName string    `json:"search_profile_name,omitempty"`
 	Contacted       bool      `json:"contacted"`
 	Notified        bool      `json:"notified"`
+	// Skipped flags a listing the user manually marked as ignored. The
+	// scheduler excludes skipped listings from auto-contact + previews; they
+	// remain visible in the dashboard with a distinct status badge.
+	Skipped         bool      `json:"skipped"`
+	// Rejected is true when at least one prior approval card for this listing
+	// was rejected (manually or auto-expired). Computed from sent_messages
+	// at read time, not stored as a column. Used by the dashboard to label
+	// the row and to expose an "unreject" action.
+	Rejected        bool      `json:"rejected"`
+	// Backfilled marks listings seeded by the one-time `-backfill` command
+	// (which records existing IS24 IDs so the regular poll cycle treats them
+	// as already-known). These rows ship with notified=1 and contacted=1 and
+	// carry only the search-result fields — no expose data was fetched.
+	Backfilled      bool      `json:"backfilled"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
